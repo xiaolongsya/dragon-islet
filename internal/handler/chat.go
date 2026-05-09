@@ -1,0 +1,85 @@
+package handler
+
+import (
+	"dragon-islet/internal/logic"
+	"dragon-islet/internal/service"
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type ChatHandler struct {
+	chatService service.ChatService
+}
+
+func (h *ChatHandler) WsChat(c *gin.Context) {
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return
+	}
+
+	client := &logic.Client{
+		Conn: conn,
+		Send: make(chan []byte, 256),
+	}
+
+	logic.GlobalHub.Register(client)
+
+	// 启动写协程
+	go client.WritePump()
+	// 启动读协程 (主要用于心跳)
+	go client.ReadPump()
+}
+
+func (h *ChatHandler) Send(c *gin.Context) {
+	// 获取当前登录用户 ID (从 JWT 中间件解析出来的)
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	var req struct {
+		Content string `json:"content" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "内容不能为空"})
+		return
+	}
+
+	msg, willReply, err := h.chatService.SendMessage(userID, req.Content)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "誓言已传达",
+		"data":       msg,
+		"will_reply": willReply,
+	})
+}
+
+func (h *ChatHandler) List(c *gin.Context) {
+	const pageSize = 15
+	beforeIDStr := c.DefaultQuery("before_id", "0")
+	beforeID, _ := strconv.ParseUint(beforeIDStr, 10, 64)
+
+	messages, hasMore, err := h.chatService.GetMessages(pageSize, uint(beforeID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取消息失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":     messages,
+		"has_more": hasMore,
+	})
+}

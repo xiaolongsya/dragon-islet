@@ -1,0 +1,28 @@
+# 示例配置（请复制为 config.yaml 并填写自己的密钥；config.yaml 已被 .gitignore 忽略）
+
+db:
+  # MySQL 连接地址，格式: 用户名:密码@tcp(地址:端口)/数据库名?charset=utf8mb4&parseTime=True&loc=Local
+  dsn: ""
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+
+deepseek:
+  # DeepSeek API Key
+  api_key: ""
+
+jwt:
+  # 建议使用强随机字符串，并通过环境变量覆盖
+  secret: "CHANGE_ME"
+
+aliyun:
+  access_key_id: ""
+  access_key_secret: ""
+  sign_name: ""
+  template_code: ""
+
+upload:
+  save_path: "./uploads"
+  # 注意：项目静态路由是 /dragon/uploads
+  base_url: "http://localhost:8080/dragon/uploads"

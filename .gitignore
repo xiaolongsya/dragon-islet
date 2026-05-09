@@ -1,0 +1,28 @@
+# ---- OS / Editor ----
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Go build outputs
+/bin/
+/dist/
+*.exe
+*.out
+*.test
+*.prof
+
+# Logs
+*.log
+
+# Uploads (runtime generated)
+uploads/
+
+# Local config with secrets (do not commit)
+configs/config.yaml
+
+# Optional env files
+.env
+.env.*
