@@ -68,16 +68,47 @@ func (s *ChatService) TriggerAIReply(userMsg *model.Message) {
 	// 模拟思考延迟
 	time.Sleep(2 * time.Second)
 
+	// 获取最近 20 条上下文 (排除已撤回的消息)
+	var contextMsgs []model.Message
+	global.DB.Preload("User").Where("is_recalled = ?", false).Order("created_at desc").Limit(20).Find(&contextMsgs)
+	
+	// 倒序排列，让时间线正常
+	for i, j := 0, len(contextMsgs)-1; i < j; i, j = i+1, j-1 {
+		contextMsgs[i], contextMsgs[j] = contextMsgs[j], contextMsgs[i]
+	}
+
+	// 获取最近的一篇史诗作为大背景
+	var lastArchive model.Archive
+	global.DB.Order("date desc").First(&lastArchive)
+
 	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
 
-	// 获取用户信息
+	// 获取当前发言游侠信息
 	var user model.User
 	global.DB.First(&user, userMsg.UserID)
 
+	// 构建上下文 Prompt
 	aiPrompt := []deepseek.Message{
-		{Role: "system", Content: "你是一头名为'龙屿之主'的西方巨龙，性格高傲、睿智且带有一点幽默。你会点评人们在广场上的发言。请保持简短。"},
-		{Role: "user", Content: fmt.Sprintf("用户 %s 说: %s", user.Username, userMsg.Content)},
+		{Role: "system", Content: fmt.Sprintf("你是一头名为'龙屿之主'的西方巨龙，性格高傲、睿智且带有一点幽默。你正在审视'龙屿'广场上的誓言。最近的岛屿史诗是《%s》。请根据最近的对话氛围，对当前游侠的发言进行简短精辟的点评。", lastArchive.Title)},
 	}
+
+	// 注入上下文
+	for _, m := range contextMsgs {
+		role := "user"
+		name := "匿名游侠"
+		if m.User.Username != "" { name = m.User.Username }
+		content := m.Content
+		if m.IsAIReply {
+			role = "assistant"
+			content = m.Content
+		} else {
+			content = fmt.Sprintf("[%s]: %s", name, m.Content)
+		}
+		aiPrompt = append(aiPrompt, deepseek.Message{Role: role, Content: content})
+	}
+
+	// 注入当前需要回复的消息
+	aiPrompt = append(aiPrompt, deepseek.Message{Role: "user", Content: fmt.Sprintf("[%s]: %s", user.Username, userMsg.Content)})
 
 	replyContent, err := dsClient.Chat(aiPrompt)
 	if err != nil {
@@ -166,4 +197,50 @@ func (s *ChatService) GetUserMessages(userID uint, limit int, offset int) ([]mod
 		Find(&messages).Error
 
 	return messages, total, err
+}
+
+// ForceAIReply 动用秘宝强制触发回复
+func (s *ChatService) ForceAIReply(userID uint, messageID uint) error {
+	ctx := context.Background()
+	cooldownKey := fmt.Sprintf("force_reply_cooldown:%d", userID)
+	
+	// 1. 冷却检查
+	if exists, _ := global.REDIS.Exists(ctx, cooldownKey).Result(); exists > 0 {
+		ttl, _ := global.REDIS.TTL(ctx, cooldownKey).Result()
+		return fmt.Errorf("秘宝冷却中，还需等待 %d 秒", int(ttl.Seconds()))
+	}
+
+	var msg model.Message
+	if err := global.DB.First(&msg, messageID).Error; err != nil {
+		return errors.New("该誓言已消散在虚空")
+	}
+
+	// 2. 规则检查
+	if msg.UserID == nil || *msg.UserID != userID {
+		return errors.New("你只能对自己被不屑的誓言使用秘宝")
+	}
+	if msg.AIInterest {
+		return errors.New("龙主已给予关注，无需动用秘宝")
+	}
+	if msg.IsForceReplied {
+		return errors.New("此誓言已动用过秘宝")
+	}
+
+	// 3. 状态更新与异步触发
+	msg.IsForceReplied = true
+	msg.AIInterest = true // 修改状态为感兴趣，触发回复
+	if err := global.DB.Save(&msg).Error; err != nil {
+		return err
+	}
+
+	// 广播状态更新
+	global.DB.Preload("User").First(&msg, msg.ID)
+	logic.GlobalHub.BroadcastMessage(&msg)
+
+	// 设置5分钟冷却
+	global.REDIS.Set(ctx, cooldownKey, "1", 5*time.Minute)
+
+	go s.TriggerAIReply(&msg)
+
+	return nil
 }

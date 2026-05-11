@@ -7,8 +7,11 @@ import (
 
 	"dragon-islet/internal/logic"
 	"dragon-islet/internal/middleware"
+	"dragon-islet/internal/service"
+	"fmt"
 
 	"github.com/gin-gonic/gin"
+	"github.com/robfig/cron/v3"
 )
 
 func main() {
@@ -18,6 +21,19 @@ func main() {
 
 	// 启动 WebSocket 枢纽
 	go logic.GlobalHub.Run()
+
+	// 启动定时任务 (每日 03:00 生成史诗)
+	c := cron.New()
+	archiveService := &service.ArchiveService{}
+	c.AddFunc("0 3 * * *", func() {
+		fmt.Println("[Cron] 开始生成每日史诗...")
+		if err := archiveService.GenerateDailyArchive(); err != nil {
+			fmt.Printf("[Cron] 生成史诗失败: %v\n", err)
+		} else {
+			fmt.Println("[Cron] 每日史诗生成成功")
+		}
+	})
+	c.Start()
 
 	r := gin.Default()
 
@@ -73,6 +89,7 @@ func main() {
 			chatAuth.POST("/send", chatHandler.Send)
 			chatAuth.DELETE("/:id", chatHandler.Delete)
 			chatAuth.GET("/my", chatHandler.MyMessages)
+			chatAuth.POST("/force-reply", chatHandler.ForceReply)
 		}
 
 		// 用户相关 (需要 JWT)
@@ -90,6 +107,15 @@ func main() {
 		{
 			feedbackGroup.POST("/submit", feedbackHandler.Submit)
 			feedbackGroup.GET("/my", feedbackHandler.List)
+			feedbackGroup.DELETE("/:id", feedbackHandler.Delete)
+		}
+
+		// 管理员相关
+		admin := api.Group("/admin")
+		admin.Use(middleware.JWTAuth(), middleware.AdminAuth())
+		{
+			admin.GET("/feedback", feedbackHandler.AdminList)
+			admin.POST("/feedback/reply", feedbackHandler.AdminReply)
 		}
 	}
 

@@ -33,6 +33,19 @@ func JWTAuth() gin.HandlerFunc {
 
 		// 将用户信息存入上下文
 		c.Set("userID", claims.UserID)
+		c.Set("role", claims.Role)
+		c.Next()
+	}
+}
+
+func AdminAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, exists := c.Get("role")
+		if !exists || role != "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "权限不足，非龙屿守护者不可进入"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

@@ -71,7 +71,7 @@ func (s *AuthService) Login(username, password string) (string, *model.User, err
 		return "", nil, errors.New("密语错误（密码错误）")
 	}
 
-	token, _ := utils.GenerateToken(user.ID)
+	token, _ := utils.GenerateToken(user.ID, user.Role)
 	return token, &user, nil
 }
 

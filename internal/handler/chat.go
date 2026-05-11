@@ -54,6 +54,11 @@ func (h *ChatHandler) Send(c *gin.Context) {
 		return
 	}
 
+	if len([]rune(req.Content)) > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "誓言过长，请精简至 500 字以内"})
+		return
+	}
+
 	msg, willReply, err := h.chatService.SendMessage(userID, req.Content)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -125,4 +130,24 @@ func (h *ChatHandler) MyMessages(c *gin.Context) {
 		"page":  page,
 		"limit": limit,
 	})
+}
+
+func (h *ChatHandler) ForceReply(c *gin.Context) {
+	userIDVal, _ := c.Get("userID")
+	userID := userIDVal.(uint)
+
+	var req struct {
+		ID uint `json:"id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	if err := h.chatService.ForceAIReply(userID, req.ID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "秘宝已激活，请静候回响"})
 }

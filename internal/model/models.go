@@ -24,6 +24,7 @@ type Message struct {
 	IsAIReply        bool     `gorm:"default:false" json:"is_ai_reply"`
 	AIInterest       bool     `gorm:"default:false" json:"ai_interest"` // 新增：龙主兴趣状态
 	IsRecalled       bool     `gorm:"default:false" json:"is_recalled"` // 新增：撤回状态
+	IsForceReplied   bool     `gorm:"default:false" json:"is_force_replied"` // 新增：是否使用了秘宝
 	ReplyToMessageID *uint    `json:"reply_to_message_id"`
 	ReplyToMessage   *Message `gorm:"foreignKey:ReplyToMessageID" json:"reply_to_message"`
 }
