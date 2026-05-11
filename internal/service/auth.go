@@ -46,7 +46,7 @@ func (s *AuthService) Register(username, password, phone, code string) error {
 		Username: username,
 		Password: string(hashedPassword),
 		Phone:    phone,
-		Avatar:   "https://xiaolongya.cn/uploads/b07749cd-bbe8-4568-9d94-f152d0d306d3.jpg",
+		Avatar:   "https://xiaolongya.cn/uploads/1778432333617872906.jpg",
 		Role:     "user",
 	}
 

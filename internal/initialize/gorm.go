@@ -23,7 +23,7 @@ func InitDB() {
 	}
 
 	// 自动迁移模型
-	err = db.AutoMigrate(&model.User{}, &model.Message{}, &model.Archive{})
+	err = db.AutoMigrate(&model.User{}, &model.Message{}, &model.Archive{}, &model.Feedback{})
 	if err != nil {
 		log.Fatalf("Failed to auto-migrate models: %v", err)
 	}

@@ -83,3 +83,46 @@ func (h *ChatHandler) List(c *gin.Context) {
 		"has_more": hasMore,
 	})
 }
+
+func (h *ChatHandler) Delete(c *gin.Context) {
+	userIDVal, _ := c.Get("userID")
+	userID := userIDVal.(uint)
+
+	idStr := c.Param("id")
+	id, _ := strconv.ParseUint(idStr, 10, 64)
+
+	if err := h.chatService.DeleteMessage(userID, uint(id)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "誓言已抹除"})
+}
+
+func (h *ChatHandler) MyMessages(c *gin.Context) {
+	userIDVal, _ := c.Get("userID")
+	userID := userIDVal.(uint)
+
+	pageStr := c.DefaultQuery("page", "1")
+	limitStr := c.DefaultQuery("limit", "10")
+
+	page, _ := strconv.Atoi(pageStr)
+	limit, _ := strconv.Atoi(limitStr)
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * limit
+
+	messages, total, err := h.chatService.GetUserMessages(userID, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取记录失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  messages,
+		"total": total,
+		"page":  page,
+		"limit": limit,
+	})
+}
