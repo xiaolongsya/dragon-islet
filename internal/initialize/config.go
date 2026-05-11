@@ -6,9 +6,13 @@ import (
 	"os"
 
 	"github.com/spf13/viper"
+	"github.com/subosito/gotenv"
 )
 
 func InitConfig() {
+	// 加载 .env 文件 (如果存在)
+	gotenv.Load()
+
 	v := viper.New()
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -35,6 +39,21 @@ func InitConfig() {
 
 	if os.Getenv("REDIS_PASSWORD") != "" {
 		v.Set("redis.password", os.Getenv("REDIS_PASSWORD"))
+	}
+	if os.Getenv("JWT_SECRET") != "" {
+		v.Set("jwt.secret", os.Getenv("JWT_SECRET"))
+	}
+	if os.Getenv("ALIYUN_AK") != "" {
+		v.Set("aliyun.access_key_id", os.Getenv("ALIYUN_AK"))
+	}
+	if os.Getenv("ALIYUN_SK") != "" {
+		v.Set("aliyun.access_key_secret", os.Getenv("ALIYUN_SK"))
+	}
+	if os.Getenv("UPLOAD_PATH") != "" {
+		v.Set("upload.save_path", os.Getenv("UPLOAD_PATH"))
+	}
+	if os.Getenv("UPLOAD_URL") != "" {
+		v.Set("upload.base_url", os.Getenv("UPLOAD_URL"))
 	}
 
 	global.CONFIG = v
