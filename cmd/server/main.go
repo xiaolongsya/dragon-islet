@@ -1,7 +1,6 @@
 package main
 
 import (
-	"dragon-islet/internal/global"
 	"dragon-islet/internal/handler"
 	"dragon-islet/internal/initialize"
 	"net/http"
@@ -88,11 +87,13 @@ func main() {
 	})
 
 	// 静态文件服务
-	saveDir := global.CONFIG.GetString("upload.save_path")
-	if saveDir == "" {
-		saveDir = "./uploads"
-	}
-	r.Static("/dragon/uploads", saveDir)
+	// 静态文件访问交由 Nginx 处理，服务器不再直接暴露 uploads 目录。
+	// 如需在 Go 中启用静态服务，可取消下面代码并确保 save_path 为正确绝对路径。
+	// saveDir := global.CONFIG.GetString("upload.save_path")
+	// if saveDir == "" {
+	//         saveDir = "./uploads"
+	// }
+	// r.Static("/dragon/uploads", saveDir)
 
-	r.Run(":8080")
+	r.Run(":8888")
 }
