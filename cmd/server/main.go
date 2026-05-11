@@ -34,6 +34,7 @@ func main() {
 
 	chatHandler := &handler.ChatHandler{}
 	authHandler := &handler.AuthHandler{}
+	feedbackHandler := &handler.FeedbackHandler{}
 
 	api := r.Group("/dragon")
 	{
@@ -70,6 +71,8 @@ func main() {
 		chatAuth.Use(middleware.JWTAuth())
 		{
 			chatAuth.POST("/send", chatHandler.Send)
+			chatAuth.DELETE("/:id", chatHandler.Delete)
+			chatAuth.GET("/my", chatHandler.MyMessages)
 		}
 
 		// 用户相关 (需要 JWT)
@@ -79,6 +82,14 @@ func main() {
 		{
 			userGroup.POST("/profile", userHandler.UpdateProfile)
 			userGroup.POST("/password", userHandler.UpdatePassword)
+		}
+
+		// 匿名信
+		feedbackGroup := api.Group("/feedback")
+		feedbackGroup.Use(middleware.JWTAuth())
+		{
+			feedbackGroup.POST("/submit", feedbackHandler.Submit)
+			feedbackGroup.GET("/my", feedbackHandler.List)
 		}
 	}
 
