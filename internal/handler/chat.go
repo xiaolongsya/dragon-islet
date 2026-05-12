@@ -151,3 +151,32 @@ func (h *ChatHandler) ForceReply(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "秘宝已激活，请静候回响"})
 }
+
+func (h *ChatHandler) GenerateImage(c *gin.Context) {
+	userIDVal, _ := c.Get("userID")
+	userID := userIDVal.(uint)
+
+	var req struct {
+		Prompt string `json:"prompt" binding:"required"`
+		Size   string `json:"size"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请描述你想要幻化的画面"})
+		return
+	}
+
+	ip := c.ClientIP()
+	userMsgID, taskID, err := h.chatService.GenerateImageTask(userID, ip, req.Prompt, req.Size)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 异步轮询结果并广播，传入关联的消息 ID
+	go h.chatService.PollImageTaskResult(taskID, userID, userMsgID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "龙息正在凝聚，幻象即刻显现...",
+		"task_id": taskID,
+	})
+}

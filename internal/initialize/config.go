@@ -51,9 +51,14 @@ func InitConfig() {
 	}
 	if os.Getenv("UPLOAD_PATH") != "" {
 		v.Set("upload.save_path", os.Getenv("UPLOAD_PATH"))
+		v.Set("UPLOAD_PATH", os.Getenv("UPLOAD_PATH"))
 	}
 	if os.Getenv("UPLOAD_URL") != "" {
 		v.Set("upload.base_url", os.Getenv("UPLOAD_URL"))
+		v.Set("UPLOAD_URL", os.Getenv("UPLOAD_URL"))
+	}
+	if os.Getenv("APIMART_TOKEN") != "" {
+		v.Set("APIMART_TOKEN", os.Getenv("APIMART_TOKEN"))
 	}
 
 	global.CONFIG = v

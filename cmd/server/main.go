@@ -69,7 +69,10 @@ func main() {
 		// 史诗相关
 		archiveHandler := &handler.ArchiveHandler{}
 		api.GET("/archives", archiveHandler.List)
-		api.POST("/archives/generate", archiveHandler.ManualGenerate)
+		api.GET("/archives/manifesto", archiveHandler.GetManifesto)
+		api.GET("/archives/analyze", middleware.JWTAuth(), archiveHandler.Analyze)
+		api.POST("/archives", middleware.JWTAuth(), archiveHandler.Create)
+		api.POST("/archives/generate", middleware.JWTAuth(), archiveHandler.ManualGenerate)
 
 		// 龙主语录 (公开)
 		quoteHandler := &handler.QuoteHandler{}
@@ -90,6 +93,7 @@ func main() {
 			chatAuth.DELETE("/:id", chatHandler.Delete)
 			chatAuth.GET("/my", chatHandler.MyMessages)
 			chatAuth.POST("/force-reply", chatHandler.ForceReply)
+			chatAuth.POST("/generate-image", chatHandler.GenerateImage)
 		}
 
 		// 用户相关 (需要 JWT)
@@ -97,6 +101,7 @@ func main() {
 		userGroup := api.Group("/user")
 		userGroup.Use(middleware.JWTAuth())
 		{
+			userGroup.GET("/profile", userHandler.GetProfile)
 			userGroup.POST("/profile", userHandler.UpdateProfile)
 			userGroup.POST("/password", userHandler.UpdatePassword)
 		}

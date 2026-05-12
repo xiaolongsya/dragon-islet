@@ -16,13 +16,14 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 	var req struct {
 		Nickname string `json:"nickname"`
 		Avatar   string `json:"avatar"`
+		Motto    string `json:"motto"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
 		return
 	}
 
-	if err := h.authService.UpdateProfile(userID, req.Nickname, req.Avatar); err != nil {
+	if err := h.authService.UpdateProfile(userID, req.Nickname, req.Avatar, req.Motto); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -47,4 +48,14 @@ func (h *UserHandler) UpdatePassword(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "密语重塑成功"})
+}
+
+func (h *UserHandler) GetProfile(c *gin.Context) {
+	userID := c.MustGet("userID").(uint)
+	user, err := h.authService.GetUserByID(userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, user)
 }

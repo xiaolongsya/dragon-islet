@@ -13,6 +13,9 @@ type User struct {
 	Password          string    `gorm:"type:varchar(255)" json:"-"`
 	Avatar            string    `gorm:"type:varchar(255)" json:"avatar"`
 	Role              string    `gorm:"type:varchar(20);default:'user'" json:"role"` // 'admin', 'user', 'ai'
+	Motto             string    `gorm:"type:varchar(255)" json:"motto"`                       // 新增：游侠宣言
+	Title             string    `gorm:"type:varchar(50);default:'初入龙屿的游侠'" json:"title"`      // 新增：身份称号
+	Experience        int       `gorm:"default:0" json:"experience"`                          // 新增：灵力值
 	NicknameChangedAt *time.Time `json:"nickname_changed_at"`
 }
 
@@ -36,8 +39,16 @@ func (m *Message) TableName() string {
 type Archive struct {
 	gorm.Model
 	Title   string `gorm:"type:varchar(255)" json:"title"`
-	Content string `gorm:"type:longtext" json:"content"` // AI 生成的 HTML 或 Markdown
-	Date    string `gorm:"type:varchar(20);uniqueIndex" json:"date"` // 格式：2024-05-09
+	Content string `gorm:"type:longtext" json:"content"` // AI 生成的或手动录入的内容
+	Date    string `gorm:"type:varchar(20)" json:"date"`  // 格式：2024-05-09
+	Type    int    `gorm:"default:0" json:"type"`        // 0: 每日行纪, 1: 铸龙图谱
+}
+
+// MagicRecord 龙语显像记录表
+type MagicRecord struct {
+	gorm.Model
+	UserID   uint   `json:"user_id"`
+	ImageURL string `json:"image_url"`
 }
 
 type Feedback struct {

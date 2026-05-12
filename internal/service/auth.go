@@ -114,8 +114,8 @@ func (s *AuthService) ResetPassword(phone, code, newPassword string) error {
 	return nil
 }
 
-// UpdateProfile 修改昵称和头像
-func (s *AuthService) UpdateProfile(userID uint, nickname, avatar string) error {
+// UpdateProfile 修改昵称、头像和宣言
+func (s *AuthService) UpdateProfile(userID uint, nickname, avatar, motto string) error {
 	var user model.User
 	global.DB.First(&user, userID)
 
@@ -141,6 +141,10 @@ func (s *AuthService) UpdateProfile(userID uint, nickname, avatar string) error 
 		updates["avatar"] = avatar
 	}
 
+	if motto != "" {
+		updates["motto"] = motto
+	}
+
 	return global.DB.Model(&user).Updates(updates).Error
 }
 
@@ -149,4 +153,13 @@ func (s *AuthService) UpdatePasswordInternal(userID uint, code, newPassword stri
 	var user model.User
 	global.DB.First(&user, userID)
 	return s.ResetPassword(user.Phone, code, newPassword)
+}
+
+// GetUserByID 获取用户信息
+func (s *AuthService) GetUserByID(userID uint) (*model.User, error) {
+	var user model.User
+	if err := global.DB.First(&user, userID).Error; err != nil {
+		return nil, errors.New("游侠未被记载")
+	}
+	return &user, nil
 }

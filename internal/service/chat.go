@@ -5,10 +5,14 @@ import (
 	"dragon-islet/internal/global"
 	"dragon-islet/internal/logic"
 	"dragon-islet/internal/model"
+	"dragon-islet/pkg/apimart"
 	"dragon-islet/pkg/deepseek"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
+	"net/http"
+	"path/filepath"
 	"time"
 )
 
@@ -55,7 +59,10 @@ func (s *ChatService) SendMessage(userID uint, content string) (*model.Message, 
 	// 6. 设置频率限制
 	global.REDIS.Set(ctx, key, "1", 1*time.Minute)
 
-	// 7. 如果感兴趣，触发异步回复
+	// 7. 灵力增长与称号进阶
+	go s.GainExperience(userID)
+
+	// 8. 如果感兴趣，触发异步回复
 	if willReply {
 		go s.TriggerAIReply(msg)
 	}
@@ -243,4 +250,171 @@ func (s *ChatService) ForceAIReply(userID uint, messageID uint) error {
 	go s.TriggerAIReply(&msg)
 
 	return nil
+}
+
+// GainExperience 增加用户灵力并尝试进阶称号
+func (s *ChatService) GainExperience(userID uint) {
+	var user model.User
+	if err := global.DB.First(&user, userID).Error; err != nil {
+		return
+	}
+
+	user.Experience += 1
+
+	// 称号算法
+	newTitle := "初入龙屿的游侠"
+	exp := user.Experience
+	if exp > 500 {
+		newTitle = "龙屿不灭的灵魂"
+	} else if exp > 200 {
+		newTitle = "洞悉因果的智者"
+	} else if exp > 80 {
+		newTitle = "守护龙火的圣骑"
+	} else if exp > 30 {
+		newTitle = "聆听真言的信徒"
+	} else if exp > 10 {
+		newTitle = "跋涉迷雾的旅者"
+	}
+
+	user.Title = newTitle
+	global.DB.Save(&user)
+}
+
+// GenerateImageTask 提交图片生成任务
+func (s *ChatService) GenerateImageTask(userID uint, ip string, prompt string, size string) (uint, string, error) {
+	todayStart := time.Now().Truncate(24 * time.Hour)
+	var user model.User
+	global.DB.First(&user, userID)
+
+	// 2. 因果律检查：今日必须发言一次
+	var msgCount int64
+	global.DB.Model(&model.Message{}).Where("user_id = ? AND created_at >= ?", userID, todayStart).Count(&msgCount)
+	if msgCount == 0 {
+		return 0, "", errors.New("你今日尚未留下任何誓言，龙主无法捕捉你的神念")
+	}
+
+	// 3. 个人限额检查 (数据库账本：2次/天)
+	var uCount int64
+	global.DB.Model(&model.MagicRecord{}).Where("user_id = ? AND created_at >= ?", userID, todayStart).Count(&uCount)
+	if uCount >= 2 {
+		return 0, "", errors.New("今日显像次数已达上限（2/2），请明日再试")
+	}
+
+	// 4. 全站限额检查 (数据库账本：20次/天)
+	var gCount int64
+	global.DB.Model(&model.MagicRecord{}).Where("created_at >= ?", todayStart).Count(&gCount)
+	if gCount >= 20 {
+		return 0, "", errors.New("今日全站显像名额（20/20）已满，请明日请早")
+	}
+
+	// 5. 调用 API Mart
+	// 先把用户的“幻化咒语”存为一条消息
+	userMsg := &model.Message{
+		Content: "✨ [龙语显像] " + prompt,
+		UserID:  &userID,
+	}
+	global.DB.Create(userMsg)
+	global.DB.Preload("User").First(userMsg, userMsg.ID)
+	logic.GlobalHub.BroadcastMessage(userMsg)
+
+	// 3. 调用 API Mart
+	token := global.CONFIG.GetString("APIMART_TOKEN")
+	fmt.Printf("[Magic] 正在提交任务，Token长度: %d, Prompt: %s, Size: %s\n", len(token), prompt, size)
+	
+	client := apimart.NewClient(token)
+	taskID, err := client.CreateImage(prompt, size)
+	if err != nil {
+		fmt.Printf("[Magic] 提交任务失败: %v\n", err)
+		return 0, "", err
+	}
+	fmt.Printf("[Magic] 任务提交成功，TaskID: %s\n", taskID)
+
+	// 4. 提交成功后无需在 Redis 记录，统一由 PollImageTaskResult 成功后写入 DB
+	return userMsg.ID, taskID, nil
+}
+
+// PollImageTaskResult 轮询、下载并发布图片结果
+func (s *ChatService) PollImageTaskResult(taskID string, userID uint, replyToID uint) {
+	token := global.CONFIG.GetString("APIMART_TOKEN")
+	client := apimart.NewClient(token)
+
+	fmt.Printf("[Magic] 开始异步轮询任务: %s\n", taskID)
+
+	for i := 0; i < 60; i++ {
+		time.Sleep(3 * time.Second)
+		res, err := client.GetTaskStatus(taskID)
+		if err != nil {
+			fmt.Printf("[Magic] 轮询第 %d 次失败: %v\n", i+1, err)
+			continue
+		}
+
+		// 打印详细状态信息
+		fmt.Printf("[Magic] 轮询第 %d 次: Status=%s, Progress=%d%%, Detail=%+v\n", i+1, res.Data.Status, res.Data.Progress, res.Data)
+
+		if res.Data.Status == "completed" && len(res.Data.Result.Images) > 0 {
+			remoteURL := res.Data.Result.Images[0].URL[0]
+			fmt.Printf("[Magic] 幻化完成！远程链接: %s\n", remoteURL)
+
+			// --- 新增：图片转存逻辑 ---
+			localURL, err := s.saveImageLocally(remoteURL)
+			if err != nil {
+				fmt.Printf("[Magic] 图片本地化失败: %v, 将使用远程链接\n", err)
+				localURL = remoteURL 
+			} else {
+				fmt.Printf("[Magic] 图片已存至本地: %s\n", localURL)
+			}
+
+			aiMsg := &model.Message{
+				Content:          fmt.Sprintf("![](%s)", localURL),
+				IsAIReply:        true,
+				ReplyToMessageID: &replyToID,
+			}
+			global.DB.Create(aiMsg)
+
+			// 记录到幻化账本
+			global.DB.Create(&model.MagicRecord{
+				UserID:   userID,
+				ImageURL: localURL,
+			})
+
+			global.DB.Preload("User").Preload("ReplyToMessage.User").First(aiMsg, aiMsg.ID)
+			logic.GlobalHub.BroadcastMessage(aiMsg)
+			fmt.Printf("[Magic] 图片消息已广播，ID: %d\n", aiMsg.ID)
+			return
+		}
+		if res.Data.Status == "failed" {
+			fmt.Printf("[Magic] 任务失败，TaskID: %s\n", taskID)
+			return
+		}
+	}
+	fmt.Printf("[Magic] 轮询超时，TaskID: %s\n", taskID)
+}
+
+// saveImageLocally 下载远程图片并保存到本地 uploads
+func (s *ChatService) saveImageLocally(remoteURL string) (string, error) {
+	resp, err := http.Get(remoteURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// 生成文件名
+	fileName := fmt.Sprintf("magic_%d.png", time.Now().UnixNano())
+	uploadPath := global.CONFIG.GetString("UPLOAD_PATH")
+	if uploadPath == "" {
+		uploadPath = "./uploads"
+	}
+	
+	fullPath := filepath.Join(uploadPath, fileName)
+	if err := ioutil.WriteFile(fullPath, data, 0666); err != nil {
+		return "", err
+	}
+
+	baseURL := global.CONFIG.GetString("UPLOAD_URL")
+	return fmt.Sprintf("%s/%s", baseURL, fileName), nil
 }
