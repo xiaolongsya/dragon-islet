@@ -87,7 +87,12 @@ func (s *ArchiveService) CreateArchive(title, content string, archiveType int) e
 		Date:    time.Now().Format("2006-01-02"),
 		Type:    archiveType,
 	}
-	return global.DB.Create(archive).Error
+	err := global.DB.Create(archive).Error
+	if err == nil && archiveType == 1 {
+		// 如果是技术图谱，异步触发架构总览自动更新
+		go s.UpdateManifestoFile(title, content)
+	}
+	return err
 }
 
 // AnalyzeCodebase 让 AI 扫描代码变更并给出建议
@@ -127,4 +132,56 @@ func (s *ArchiveService) AnalyzeCodebase() (map[string]string, error) {
 func (s *ArchiveService) GetManifesto() (string, error) {
 	content, err := os.ReadFile("TECH_MANIFESTO.md")
 	return string(content), err
+}
+// UpdateManifestoFile 核心逻辑：AI 复盘代码并重写架构宣言
+func (s *ArchiveService) UpdateManifestoFile(latestTitle, latestContent string) {
+	fmt.Printf("[Architect] 正在自动复盘并更新架构总览...\n")
+
+	// 1. 读取核心代码片段 (作为 AI 的参考背景)
+	mCode, _ := os.ReadFile("internal/model/models.go")
+	sCode, _ := os.ReadFile("internal/service/chat.go")
+	hCode, _ := os.ReadFile("internal/handler/chat.go")
+	fCode, _ := os.ReadFile("../dragon-islet-web/src/App.vue")
+
+	// 2. 构造 AI 提示词
+	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
+	systemPrompt := `你是一个名为'架构之灵'的项目大管家。你需要负责维护龙屿项目的'TECH_MANIFESTO.md'（技术架构宣言）。
+你的任务：根据最新发布的更新日志和代码现状，重写整个'TECH_MANIFESTO.md'。
+要求：
+- 风格：硬核、极简、富有龙屿特有的史诗感。
+- 内容：包含核心架构、技术栈、最新实现的重大功能模块、待办愿景。
+- 请直接输出 Markdown 内容，不要包含代码块标记。`
+
+	userContent := fmt.Sprintf(`【最新更新日志】：%s
+【日志详情】：%s
+
+【最新后端代码参考】：
+- 模型层：
+%s
+- 业务层：
+%s
+- 接口层：
+%s
+
+【最新前端代码参考】：
+%s`, latestTitle, latestContent, string(mCode), string(sCode), string(hCode), string(fCode))
+
+	prompt := []deepseek.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userContent},
+	}
+
+	newManifesto, err := dsClient.Chat(prompt)
+	if err != nil {
+		fmt.Printf("[Architect] AI 更新失败: %v\n", err)
+		return
+	}
+
+	// 3. 覆盖写入文件
+	err = os.WriteFile("TECH_MANIFESTO.md", []byte(newManifesto), 0644)
+	if err != nil {
+		fmt.Printf("[Architect] 文件写入失败: %v\n", err)
+	} else {
+		fmt.Printf("[Architect] 架构总览 TECH_MANIFESTO.md 已成功进化！\n")
+	}
 }

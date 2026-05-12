@@ -12,6 +12,12 @@ type ArchiveHandler struct {
 	archiveService service.ArchiveService
 }
 
+func NewArchiveHandler(archiveSvc service.ArchiveService) *ArchiveHandler {
+	return &ArchiveHandler{
+		archiveService: archiveSvc,
+	}
+}
+
 func (h *ArchiveHandler) List(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "10")
 	typeStr := c.DefaultQuery("type", "0") // 默认查询行纪
@@ -75,3 +81,4 @@ func (h *ArchiveHandler) GetManifesto(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"content": content})
 }
+

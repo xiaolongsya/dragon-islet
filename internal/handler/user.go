@@ -8,7 +8,41 @@ import (
 )
 
 type UserHandler struct {
-	authService service.AuthService
+	authService   service.AuthService
+	userService   service.UserService
+	dragonService service.DragonService
+}
+
+func NewUserHandler(authSvc service.AuthService, userSvc service.UserService, dragonSvc service.DragonService) *UserHandler {
+	return &UserHandler{
+		authService:   authSvc,
+		userService:   userSvc,
+		dragonService: dragonSvc,
+	}
+}
+
+func (h *UserHandler) GetFortune(c *gin.Context) {
+	userID := c.MustGet("userID").(uint)
+	record, err := h.userService.GetDailyFortune(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "神龙祭司正忙，请稍后再求签"})
+		return
+	}
+
+	// 推进每日修行：求签
+	h.dragonService.UpdateTaskProgress(userID, "fortune", 1)
+	
+	// 显式构建返回数据，确保字段名绝对匹配前端
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"luck":           record.Luck,
+			"verse":          record.Verse,
+			"interpretation": record.Interpretation,
+			"suit":           record.Suit,
+			"avoid":          record.Avoid,
+			"date":           record.Date,
+		},
+	})
 }
 
 func (h *UserHandler) UpdateProfile(c *gin.Context) {

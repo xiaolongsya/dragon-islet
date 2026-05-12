@@ -11,6 +11,12 @@ type AuthHandler struct {
 	authService service.AuthService
 }
 
+func NewAuthHandler(authSvc service.AuthService) *AuthHandler {
+	return &AuthHandler{
+		authService: authSvc,
+	}
+}
+
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`

@@ -56,18 +56,37 @@ type ResultResponse struct {
 	} `json:"data"`
 }
 
+type ChatRequest struct {
+	Model    string `json:"model"`
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+	Temperature float64 `json:"temperature"`
+}
+
+type ChatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
 // CreateImage 提交生成任务
-func (c *Client) CreateImage(prompt string, size string) (string, error) {
+func (c *Client) CreateImage(prompt string, size string, resolution string) (string, error) {
 	url := fmt.Sprintf("%s/images/generations", c.BaseURL)
 	if size == "" {
 		size = "1:1"
+	}
+	if resolution == "" {
+		resolution = "1k"
 	}
 	payload := ImageRequest{
 		Model:            "gpt-image-2",
 		Prompt:           prompt,
 		Size:             size,
-		Resolution:       "1k",
-		Quality:          "low",
+		Resolution:       resolution,
 		N:                1,
 		OfficialFallback: true,
 	}
@@ -121,4 +140,43 @@ func (c *Client) GetTaskStatus(taskID string) (*ResultResponse, error) {
 	}
 
 	return &rr, nil
+}
+
+// GetChatCompletion 获取 AI 文本回复
+func (c *Client) GetChatCompletion(model string, prompt string, systemPrompt string) (string, error) {
+	url := fmt.Sprintf("%s/chat/completions", c.BaseURL)
+	payload := ChatRequest{
+		Model: model,
+		Temperature: 0.7,
+	}
+	payload.Messages = append(payload.Messages, struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: "system", Content: systemPrompt})
+	payload.Messages = append(payload.Messages, struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: "user", Content: prompt})
+
+	jsonData, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := ioutil.ReadAll(resp.Body)
+	var cr ChatResponse
+	if err := json.Unmarshal(body, &cr); err != nil {
+		return "", err
+	}
+
+	if len(cr.Choices) > 0 {
+		return cr.Choices[0].Message.Content, nil
+	}
+	return "", errors.New("AI 未能降下神启")
 }

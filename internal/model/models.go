@@ -1,60 +1,107 @@
 package model
 
 import (
-	"time"
-
 	"gorm.io/gorm"
+	"time"
 )
 
+// Base 模型，替代 gorm.Model，将时间戳交给 MySQL 处理
+type Base struct {
+	ID        uint           `gorm:"primarykey" json:"id"`
+	CreatedAt time.Time      `gorm:"->;<-:create;type:timestamp;default:CURRENT_TIMESTAMP;index" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"->;type:timestamp;default:CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
 type User struct {
-	gorm.Model
-	Username          string    `gorm:"type:varchar(50)" json:"username"`
-	Phone             string    `gorm:"uniqueIndex;type:varchar(20);not null" json:"phone"`
-	Password          string    `gorm:"type:varchar(255)" json:"-"`
-	Avatar            string    `gorm:"type:varchar(255)" json:"avatar"`
-	Role              string    `gorm:"type:varchar(20);default:'user'" json:"role"` // 'admin', 'user', 'ai'
-	Motto             string    `gorm:"type:varchar(255)" json:"motto"`                       // 新增：游侠宣言
-	Title             string    `gorm:"type:varchar(50);default:'初入龙屿的游侠'" json:"title"`      // 新增：身份称号
-	Experience        int       `gorm:"default:0" json:"experience"`                          // 新增：灵力值
+	Base
+	Username          string     `gorm:"uniqueIndex;type:varchar(100);not null" json:"username"`
+	Password          string     `gorm:"type:varchar(255);not null" json:"-"`
+	Avatar            string     `gorm:"type:varchar(255)" json:"avatar"`
+	Email             string     `gorm:"type:varchar(100)" json:"email"`
+	Phone             string     `gorm:"type:varchar(20)" json:"phone"`
+	Role              string     `gorm:"type:varchar(20);default:'user'" json:"role"` // 'user', 'admin'
+	Experience        int        `gorm:"default:0" json:"experience"`
+	Title             string     `gorm:"type:varchar(100);default:'初入龙屿的游侠'" json:"title"`
 	NicknameChangedAt *time.Time `json:"nickname_changed_at"`
 }
 
 type Message struct {
-	gorm.Model
+	Base
 	Content          string   `gorm:"type:text;not null" json:"content"`
-	UserID           *uint    `json:"user_id"`
+	UserID           *uint    `gorm:"index" json:"user_id"`
 	User             User     `gorm:"foreignKey:UserID" json:"user"`
-	IsAIReply        bool     `gorm:"default:false" json:"is_ai_reply"`
-	AIInterest       bool     `gorm:"default:false" json:"ai_interest"` // 新增：龙主兴趣状态
-	IsRecalled       bool     `gorm:"default:false" json:"is_recalled"` // 新增：撤回状态
-	IsForceReplied   bool     `gorm:"default:false" json:"is_force_replied"` // 新增：是否使用了秘宝
-	ReplyToMessageID *uint    `json:"reply_to_message_id"`
+	IsAIReply        bool     `gorm:"default:false" json:"is_air_reply"`
+	IsRecalled       bool     `gorm:"default:false" json:"is_recalled"`
+	ReplyToMessageID *uint    `gorm:"index" json:"reply_to_id"`
 	ReplyToMessage   *Message `gorm:"foreignKey:ReplyToMessageID" json:"reply_to_message"`
+	AIInterest       bool     `gorm:"default:false" json:"ai_interest"`
+	IsForceReplied   bool     `gorm:"default:false" json:"is_force_replied"`
 }
 
-func (m *Message) TableName() string {
-	return "messages"
+type MagicRecord struct {
+	Base
+	UserID uint   `gorm:"index" json:"user_id"`
+	Prompt string `gorm:"type:text" json:"prompt"`
 }
 
 type Archive struct {
-	gorm.Model
-	Title   string `gorm:"type:varchar(255)" json:"title"`
-	Content string `gorm:"type:longtext" json:"content"` // AI 生成的或手动录入的内容
-	Date    string `gorm:"type:varchar(20)" json:"date"`  // 格式：2024-05-09
-	Type    int    `gorm:"default:0" json:"type"`        // 0: 每日行纪, 1: 铸龙图谱
-}
-
-// MagicRecord 龙语显像记录表
-type MagicRecord struct {
-	gorm.Model
-	UserID   uint   `json:"user_id"`
-	ImageURL string `json:"image_url"`
+	Base
+	Title   string `gorm:"type:varchar(255);not null" json:"title"`
+	Content string `gorm:"type:text" json:"content"`
+	Date    string `gorm:"type:varchar(20);uniqueIndex" json:"date"`
+	Type    int    `gorm:"default:0" json:"type"` // 0: 编年史, 1: 个人传记
 }
 
 type Feedback struct {
-	gorm.Model
+	Base
 	UserID       uint   `json:"user_id"`
 	Content      string `gorm:"type:text;not null" json:"content"`
 	IsReplied    bool   `gorm:"default:false" json:"is_replied"`
 	ReplyContent string `gorm:"type:text" json:"reply_content"`
+}
+
+type Dragon struct {
+	Base
+	UserID       uint       `gorm:"uniqueIndex" json:"user_id"`
+	Name         string     `gorm:"type:varchar(100)" json:"name"`
+	Rarity       string     `gorm:"type:varchar(20)" json:"rarity"` // 'common', 'rare', 'epic'
+	Stage        int        `gorm:"default:0" json:"stage"`        // 0:蛋, 1:幼崽, 2:雏龙, 3:巨龙
+	Hunger       int        `gorm:"default:50" json:"hunger"`
+	Happiness    int        `gorm:"default:50" json:"happiness"`
+	Exp          int        `gorm:"default:0" json:"exp"`
+	LastFedAt    *time.Time `json:"last_fed_at"`
+	LastPlayedAt *time.Time `json:"last_played_at"`
+	ImageURL     string     `gorm:"type:varchar(255)" json:"image_url"`
+	BasePrompt   string     `gorm:"type:text" json:"base_prompt"`
+	Seed         int64      `json:"seed"`
+	IsGone       bool       `gorm:"default:false" json:"is_gone"`
+}
+
+type UserItem struct {
+	Base
+	UserID uint   `gorm:"index" json:"user_id"`
+	Type   string `gorm:"type:varchar(50)" json:"type"` // 'food', 'toy'
+	Count  int    `gorm:"default:0" json:"count"`
+}
+
+type UserTask struct {
+	Base
+	UserID      uint   `gorm:"index" json:"user_id"`
+	TaskType    string `gorm:"type:varchar(50)" json:"task_type"` // 'sign_in', 'chat', 'generate', 'share'
+	Progress    int    `gorm:"default:0" json:"progress"`
+	MaxProgress int    `gorm:"default:1" json:"max_progress"`
+	Date        string `gorm:"type:varchar(20);index" json:"date"` // 格式: 2024-05-13
+	IsClaimed   bool   `gorm:"default:false" json:"is_claimed"`
+}
+
+type FortuneRecord struct {
+	Base
+	UserID         uint   `gorm:"index" json:"user_id"`
+	Luck           string `gorm:"type:varchar(50)" json:"luck"`         // 大吉, 小吉...
+	Verse          string `gorm:"type:varchar(255)" json:"verse"`       // 签头 (4字)
+	Interpretation string `gorm:"type:text" json:"interpretation"`      // 详细神谕
+	Suit           string `gorm:"type:varchar(255)" json:"suit"`        // 宜 (逗号分隔)
+	Avoid          string `gorm:"type:varchar(255)" json:"avoid"`       // 忌 (逗号分隔)
+	Date           string `gorm:"type:varchar(20);index" json:"date"`
 }

@@ -35,6 +35,10 @@ func main() {
 	})
 	c.Start()
 
+	// 启动龙嗣生命周期管理 (饱食度/心情自动扣除)
+	dragonService := &service.DragonService{}
+	dragonService.StartLifeCycle()
+
 	r := gin.Default()
 
 	r.Use(func(c *gin.Context) {
@@ -48,9 +52,23 @@ func main() {
 		c.Next()
 	})
 
-	chatHandler := &handler.ChatHandler{}
-	authHandler := &handler.AuthHandler{}
-	feedbackHandler := &handler.FeedbackHandler{}
+	// 初始化 Service
+	authSvc := service.AuthService{}
+	chatSvc := service.ChatService{}
+	dragonSvc := service.DragonService{}
+	feedbackSvc := service.FeedbackService{}
+
+	// 启动龙嗣生命周期管理
+	dragonSvc.StartLifeCycle()
+
+	// 初始化 Handler 并注入 Service
+	chatHandler := handler.NewChatHandler(chatSvc, dragonSvc)
+	authHandler := handler.NewAuthHandler(authSvc)
+	userHandler := handler.NewUserHandler(authSvc, service.UserService{}, dragonSvc)
+	feedbackHandler := handler.NewFeedbackHandler(feedbackSvc)
+	archiveHandler := handler.NewArchiveHandler(service.ArchiveService{})
+	quoteHandler := &handler.QuoteHandler{}
+	uploadHandler := &handler.UploadHandler{}
 
 	api := r.Group("/dragon")
 	{
@@ -67,7 +85,6 @@ func main() {
 		}
 
 		// 史诗相关
-		archiveHandler := &handler.ArchiveHandler{}
 		api.GET("/archives", archiveHandler.List)
 		api.GET("/archives/manifesto", archiveHandler.GetManifesto)
 		api.GET("/archives/analyze", middleware.JWTAuth(), archiveHandler.Analyze)
@@ -75,14 +92,12 @@ func main() {
 		api.POST("/archives/generate", middleware.JWTAuth(), archiveHandler.ManualGenerate)
 
 		// 龙主语录 (公开)
-		quoteHandler := &handler.QuoteHandler{}
 		api.GET("/quote", quoteHandler.Get)
 
 		// 聊天列表 (公开)
 		api.GET("/chat/list", chatHandler.List)
 
 		// 图片上传 (需要 JWT)
-		uploadHandler := &handler.UploadHandler{}
 		api.POST("/upload", middleware.JWTAuth(), uploadHandler.UploadImage)
 
 		// 聊天发言 (需要 JWT)
@@ -97,13 +112,13 @@ func main() {
 		}
 
 		// 用户相关 (需要 JWT)
-		userHandler := &handler.UserHandler{}
 		userGroup := api.Group("/user")
 		userGroup.Use(middleware.JWTAuth())
 		{
 			userGroup.GET("/profile", userHandler.GetProfile)
 			userGroup.POST("/profile", userHandler.UpdateProfile)
 			userGroup.POST("/password", userHandler.UpdatePassword)
+			userGroup.GET("/fortune", userHandler.GetFortune)
 		}
 
 		// 匿名信
@@ -113,6 +128,22 @@ func main() {
 			feedbackGroup.POST("/submit", feedbackHandler.Submit)
 			feedbackGroup.GET("/my", feedbackHandler.List)
 			feedbackGroup.DELETE("/:id", feedbackHandler.Delete)
+		}
+
+		// 养成系统
+		dragonHandler := handler.NewDragonHandler(dragonSvc)
+		dragonGroup := api.Group("/raising")
+		dragonGroup.Use(middleware.JWTAuth())
+		{
+			dragonGroup.GET("/status", dragonHandler.GetStatus)
+			dragonGroup.POST("/feed", dragonHandler.Feed)
+			dragonGroup.POST("/play", dragonHandler.Play)
+			dragonGroup.POST("/rename", dragonHandler.Rename)
+			dragonGroup.POST("/generate-image", dragonHandler.GenerateImage)
+			dragonGroup.POST("/share", dragonHandler.Share)
+			dragonGroup.GET("/tasks", dragonHandler.GetTasks)
+			dragonGroup.POST("/claim-reward", dragonHandler.ClaimReward)
+			dragonGroup.POST("/use-item", dragonHandler.UseItem)
 		}
 
 		// 管理员相关

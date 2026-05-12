@@ -12,6 +12,12 @@ type FeedbackHandler struct {
 	feedbackService service.FeedbackService
 }
 
+func NewFeedbackHandler(feedbackSvc service.FeedbackService) *FeedbackHandler {
+	return &FeedbackHandler{
+		feedbackService: feedbackSvc,
+	}
+}
+
 func (h *FeedbackHandler) Submit(c *gin.Context) {
 	userIDVal, _ := c.Get("userID")
 	userID := userIDVal.(uint)

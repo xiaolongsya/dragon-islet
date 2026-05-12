@@ -15,7 +15,15 @@ var upgrader = websocket.Upgrader{
 }
 
 type ChatHandler struct {
-	chatService service.ChatService
+	chatService   service.ChatService
+	dragonService service.DragonService
+}
+
+func NewChatHandler(chatSvc service.ChatService, dragonSvc service.DragonService) *ChatHandler {
+	return &ChatHandler{
+		chatService:   chatSvc,
+		dragonService: dragonSvc,
+	}
 }
 
 func (h *ChatHandler) WsChat(c *gin.Context) {
@@ -64,6 +72,9 @@ func (h *ChatHandler) Send(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// 推进每日修行：聊天
+	h.dragonService.UpdateTaskProgress(userID, "chat", 1)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":    "誓言已传达",
@@ -155,10 +166,12 @@ func (h *ChatHandler) ForceReply(c *gin.Context) {
 func (h *ChatHandler) GenerateImage(c *gin.Context) {
 	userIDVal, _ := c.Get("userID")
 	userID := userIDVal.(uint)
+	token := c.GetHeader("Authorization") // 获取用户的 JWT 令牌
 
 	var req struct {
-		Prompt string `json:"prompt" binding:"required"`
-		Size   string `json:"size"`
+		Prompt     string `json:"prompt" binding:"required"`
+		Size       string `json:"size"`
+		Resolution string `json:"resolution"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请描述你想要幻化的画面"})
@@ -166,14 +179,14 @@ func (h *ChatHandler) GenerateImage(c *gin.Context) {
 	}
 
 	ip := c.ClientIP()
-	userMsgID, taskID, err := h.chatService.GenerateImageTask(userID, ip, req.Prompt, req.Size)
+	_, _, taskID, err := h.chatService.GenerateImageTask(userID, ip, req.Prompt, req.Size, req.Resolution, token)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 异步轮询结果并广播，传入关联的消息 ID
-	go h.chatService.PollImageTaskResult(taskID, userID, userMsgID)
+	// 推进每日修行：幻化
+	h.dragonService.UpdateTaskProgress(userID, "generate", 1)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "龙息正在凝聚，幻象即刻显现...",

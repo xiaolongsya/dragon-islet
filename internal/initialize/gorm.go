@@ -22,8 +22,21 @@ func InitDB() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
+	// 强制重置求签表以应用最新精简结构
+	db.Migrator().DropTable(&model.FortuneRecord{})
+
 	// 自动迁移模型
-	err = db.AutoMigrate(&model.User{}, &model.Message{}, &model.Archive{}, &model.Feedback{}, &model.MagicRecord{})
+	err = db.AutoMigrate(
+		&model.User{},
+		&model.Message{},
+		&model.MagicRecord{},
+		&model.Archive{},
+		&model.Feedback{},
+		&model.Dragon{},
+		&model.UserItem{},
+		&model.UserTask{},
+		&model.FortuneRecord{},
+	)
 	if err != nil {
 		log.Fatalf("Failed to auto-migrate models: %v", err)
 	}
