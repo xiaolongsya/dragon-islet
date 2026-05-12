@@ -338,10 +338,10 @@ func (s *ChatService) PollImageTaskResult(taskID string, userID uint, replyToID 
 	token := global.CONFIG.GetString("APIMART_TOKEN")
 	client := apimart.NewClient(token)
 
-	fmt.Printf("[Magic] 开始异步轮询任务: %s\n", taskID)
+	fmt.Printf("[Magic] 开始异步轮询任务: %s (预期 10 分钟)\n", taskID)
 
-	for i := 0; i < 60; i++ {
-		time.Sleep(3 * time.Second)
+	for i := 0; i < 120; i++ {
+		time.Sleep(5 * time.Second)
 		res, err := client.GetTaskStatus(taskID)
 		if err != nil {
 			fmt.Printf("[Magic] 轮询第 %d 次失败: %v\n", i+1, err)
@@ -387,7 +387,7 @@ func (s *ChatService) PollImageTaskResult(taskID string, userID uint, replyToID 
 			return
 		}
 	}
-	fmt.Printf("[Magic] 轮询超时，TaskID: %s\n", taskID)
+	fmt.Printf("[Magic] 轮询 10 分钟超时，TaskID: %s\n", taskID)
 }
 
 // saveImageLocally 下载远程图片并保存到本地 uploads
