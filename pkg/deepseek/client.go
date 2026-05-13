@@ -20,11 +20,13 @@ type Message struct {
 type ChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream"`
 }
 
 type ChatResponse struct {
 	Choices []struct {
 		Message Message `json:"message"`
+		Delta   Message `json:"delta"`
 	} `json:"choices"`
 	Error interface{} `json:"error"`
 }
@@ -32,7 +34,7 @@ type ChatResponse struct {
 func NewClient(apiKey string) *Client {
 	return &Client{
 		ApiKey: apiKey,
-		BaseUrl: "https://api.deepseek.com", // 示例地址，具体以官方为准
+		BaseUrl: "https://api.deepseek.com",
 	}
 }
 
@@ -40,6 +42,7 @@ func (c *Client) Chat(messages []Message) (string, error) {
 	reqBody := ChatRequest{
 		Model:    "deepseek-chat",
 		Messages: messages,
+		Stream:   false,
 	}
 	
 	jsonData, _ := json.Marshal(reqBody)
@@ -67,4 +70,19 @@ func (c *Client) Chat(messages []Message) (string, error) {
 	}
 
 	return "", fmt.Errorf("no response from deepseek")
+}
+
+func (c *Client) StreamChat(messages []Message) (*http.Response, error) {
+	reqBody := ChatRequest{
+		Model:    "deepseek-chat",
+		Messages: messages,
+		Stream:   true,
+	}
+	
+	jsonData, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest("POST", c.BaseUrl+"/v1/chat/completions", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.ApiKey)
+
+	return http.DefaultClient.Do(req)
 }

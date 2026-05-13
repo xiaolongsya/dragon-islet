@@ -5,6 +5,7 @@ import (
 	"dragon-islet/internal/logic"
 	"dragon-islet/internal/model"
 	"dragon-islet/pkg/apimart"
+	"dragon-islet/pkg/deepseek"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -14,8 +15,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"math/rand"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type DragonService struct{}
@@ -40,6 +44,38 @@ func (s *DragonService) StartLifeCycle() {
 				Update("happiness", global.DB.Raw("CASE WHEN happiness >= 5 THEN happiness - 5 ELSE 0 END"))
 			global.DB.Model(&model.Dragon{}).Where("rarity = ? AND happiness > 0", "epic").
 				Update("happiness", global.DB.Raw("CASE WHEN happiness >= 8 THEN happiness - 8 ELSE 0 END"))
+
+			// 3. 处理特殊状态效果
+			var activeStatuses []model.DragonStatus
+			global.DB.Where("expires_at IS NULL OR expires_at > ?", time.Now()).Find(&activeStatuses)
+			for _, st := range activeStatuses {
+				// 解析效果，如 "happiness-10"
+				if strings.Contains(st.Effect, "-") {
+					parts := strings.Split(st.Effect, "-")
+					if len(parts) == 2 {
+						attr := parts[0]
+						val, _ := strconv.Atoi(parts[1])
+						global.DB.Model(&model.Dragon{}).Where("id = ?", st.DragonID).
+							Update(attr, global.DB.Raw(fmt.Sprintf("CASE WHEN %s >= %d THEN %s - %d ELSE 0 END", attr, val, attr, val)))
+					}
+				} else if strings.Contains(st.Effect, "+") {
+					parts := strings.Split(st.Effect, "+")
+					if len(parts) == 2 {
+						attr := parts[0]
+						val, _ := strconv.Atoi(parts[1])
+						// 处理最大值限制 (MaxHappiness, MaxHunger)
+						maxAttr := "100"
+						if attr == "happiness" || attr == "hunger" {
+							maxAttr = "max_" + attr
+						}
+						global.DB.Model(&model.Dragon{}).Where("id = ?", st.DragonID).
+							Update(attr, global.DB.Raw(fmt.Sprintf("CASE WHEN %s + %d <= %s THEN %s + %d ELSE %s END", attr, val, maxAttr, attr, val, maxAttr)))
+					}
+				}
+			}
+
+			// 4. 清理已过期的状态
+			global.DB.Where("expires_at IS NOT NULL AND expires_at <= ?", time.Now()).Unscoped().Delete(&model.DragonStatus{})
 		}
 	}()
 }
@@ -47,12 +83,27 @@ func (s *DragonService) StartLifeCycle() {
 // GetDragon 获取用户的龙
 func (s *DragonService) GetDragon(userID uint) (*model.Dragon, error) {
 	var dragon model.Dragon
-	err := global.DB.Where("user_id = ? AND is_gone = ?", userID, false).First(&dragon).Error
+	err := global.DB.Preload("Statuses", "expires_at IS NULL OR expires_at > ?", time.Now()).
+		Where("user_id = ? AND is_gone = ?", userID, false).First(&dragon).Error
 	if err != nil {
 		return nil, err
 	}
 	// 打开界面自动签到
 	s.UpdateTaskProgress(userID, "sign_in", 1)
+
+	// 处理每日奇遇次数重置 (凌晨3点重置)
+	now := time.Now()
+	adjNow := now.Add(-3 * time.Hour)
+	var adjLast time.Time
+	if dragon.LastEventAt != nil {
+		adjLast = dragon.LastEventAt.Add(-3 * time.Hour)
+	}
+
+	if dragon.LastEventAt == nil || adjLast.Format("2006-01-02") != adjNow.Format("2006-01-02") {
+		dragon.DailyEventCount = 0
+		global.DB.Model(&dragon).Update("daily_event_count", 0)
+	}
+
 	return &dragon, nil
 }
 
@@ -99,40 +150,135 @@ func (s *DragonService) UseItem(userID uint, itemType string) (string, error) {
 	return msg, nil
 }
 
+// ReleaseDragon 放生龙 (需要密码校验)
+func (s *DragonService) ReleaseDragon(userID uint, password string) error {
+	// 1. 获取用户
+	var user model.User
+	if err := global.DB.First(&user, userID).Error; err != nil {
+		return errors.New("游侠身份验证失败")
+	}
+
+	// 2. 验证密码
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+		return errors.New("密语校验失败，无法解除契约")
+	}
+
+	// 3. 获取龙
+	dragon, err := s.GetDragon(userID)
+	if err != nil {
+		return errors.New("你并无契约龙嗣可以放生")
+	}
+
+	// 4. 更新状态
+	dragon.IsGone = true
+	if err := global.DB.Save(dragon).Error; err != nil {
+		return err
+	}
+
+	// 5. 自动在广场播报
+	releaseMsg := fmt.Sprintf("✨ 游侠 **%s** 解除了与龙嗣 **%s** 的契约。只见那龙化作一道霞光，隐入云端深处，回归了自然的怀抱...", user.Username, dragon.Name)
+	msg := &model.Message{
+		Content:   releaseMsg,
+		IsAIReply: true, // 标记为 AI/系统 消息样式
+	}
+	global.DB.Create(msg)
+	logic.GlobalHub.BroadcastMessage(msg)
+
+	return nil
+}
+
 // TriggerRandomEvent 触发随机事件 (AI 故事 + 道具/属性奖励)
 func (s *DragonService) TriggerRandomEvent(userID uint, actionType string) (string, error) {
 	dragon, _ := s.GetDragon(userID)
 	if dragon == nil { return "", nil }
 
-	// 1. 确定奖励池
-	rewardPool := []struct {
-		Type  string // 'item', 'stat'
-		Value string // 'exp_pill', 'sacrifice_stone', 'exp', 'happiness'
-		Amt   int
-		Name  string
-	}{
-		{Type: "stat", Value: "exp", Amt: 50, Name: "额外成长值"},
-		{Type: "item", Value: "exp_pill", Amt: 1, Name: "龙髓丹"},
-		{Type: "item", Value: "sacrifice_stone", Amt: 1, Name: "献祭之石"},
-		{Type: "stat", Value: "happiness", Amt: 30, Name: "飞跃的好心情"},
+	// 检查是否跨越凌晨3点，执行重置
+	now := time.Now()
+	adjNow := now.Add(-3 * time.Hour)
+	var adjLast time.Time
+	if dragon.LastEventAt != nil {
+		adjLast = dragon.LastEventAt.Add(-3 * time.Hour)
+	}
+	if dragon.LastEventAt == nil || adjLast.Format("2006-01-02") != adjNow.Format("2006-01-02") {
+		dragon.DailyEventCount = 0
 	}
 
-	reward := rewardPool[rand.Intn(len(rewardPool))]
+	// 每日限额 10 次
+	if dragon.DailyEventCount >= 10 {
+		return "今日已阅尽世间奇遇，且去修行，待明日旭日东升，再寻机缘。", nil
+	}
+
+	// 1. 确定动态奖励池与权重
+	isDistressed := dragon.Hunger < 20 || dragon.Happiness < 20
+	
+	type Reward struct {
+		Type   string 
+		Value  string 
+		Amt    int
+		Name   string
+		Weight int
+	}
+
+	rewardPool := []Reward{
+		{Type: "stat", Value: "exp", Amt: 50, Name: "额外成长值", Weight: 30},
+		{Type: "item", Value: "exp_pill", Amt: 1, Name: "龙髓丹", Weight: 10},
+		{Type: "stat", Value: "happiness", Amt: 30, Name: "愉悦的心情", Weight: 30},
+		{Type: "status", Value: "good_status", Amt: 0, Name: "增益状态", Weight: 30},
+	}
+
+	if isDistressed {
+		// 状态不佳时，加入负面事件
+		rewardPool = append(rewardPool, 
+			Reward{Type: "stat", Value: "exp", Amt: -30, Name: "灵力溃散", Weight: 40},
+			Reward{Type: "status", Value: "bad_status", Amt: 0, Name: "负面诅咒", Weight: 50},
+		)
+	}
+
+	// 加权随机抽取
+	totalWeight := 0
+	for _, r := range rewardPool { totalWeight += r.Weight }
+	randWeight := rand.Intn(totalWeight)
+	var reward Reward
+	for _, r := range rewardPool {
+		randWeight -= r.Weight
+		if randWeight < 0 {
+			reward = r
+			break
+		}
+	}
 
 	// 2. 召唤 AI 讲述奇遇
-	apiToken := global.CONFIG.GetString("APIMART_TOKEN")
-	client := apimart.NewClient(apiToken)
+	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
 	
-	systemPrompt := "你是一位龙屿世界的吟游诗人。请根据用户的行为（喂食或陪玩）和获得的奖励，写一段50字以内的极具诗意和画面感的奇遇描述。格式：[奇遇内容] 获得：[奖励名称]"
+	stateDesc := "状态良好"
+	if isDistressed { stateDesc = "极度饥饿或心情低落" }
+
+	systemPrompt := fmt.Sprintf("你是一位龙屿世界的吟游诗人。当前龙的状态：%s。请根据用户的行为和获得的奖励（可能是惩罚），写一段50字以内的奇遇描述。严禁使用 Emoji。\n", stateDesc)
+	if reward.Type == "status" {
+		systemPrompt += "特殊指令：描述末尾追加：获得状态：[名称] | [持续小时] | [效果: attr+/-val] | [描述]。"
+		if isDistressed {
+			systemPrompt += "由于龙状态不佳，请设计一个【负面状态】，如'虚弱'、'自闭'或'伤口感染'。"
+		}
+	} else {
+		systemPrompt += "格式：[奇遇内容] 获得（或失去）：[奖励名称]"
+	}
+
 	userPrompt := fmt.Sprintf("动作：%s，龙的名字：%s，品质：%s，获得的奖励：%s", actionType, dragon.Name, dragon.Rarity, reward.Name)
 	
-	story, _ := client.GetChatCompletion("gpt-4o-mini", userPrompt, systemPrompt)
+	story, _ := dsClient.Chat([]deepseek.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	})
 	if story == "" {
 		story = fmt.Sprintf("龙宝宝在%s时显得格外兴奋，似乎触发了某种远古共鸣！获得：%s", actionType, reward.Name)
 	}
 
 	// 3. 发放奖励
-	if reward.Type == "stat" {
+	if reward.Type == "status" {
+		// 状态奖励的处理逻辑已经在下方的 SaveDragonReply 类似的解析中，
+		// 但为了非聊天动作也能解析，我们需要在这里手动调用一次解析逻辑。
+		s.parseAndApplyStatus(dragon.ID, story)
+	} else if reward.Type == "stat" {
 		if reward.Value == "exp" { dragon.Exp += reward.Amt }
 		if reward.Value == "happiness" { dragon.Happiness += reward.Amt }
 		global.DB.Save(dragon)
@@ -147,18 +293,98 @@ func (s *DragonService) TriggerRandomEvent(userID uint, actionType string) (stri
 		}
 	}
 
+	// 增加计数
+	now = time.Now()
+	dragon.DailyEventCount++
+	dragon.LastEventAt = &now
+	global.DB.Save(dragon)
+
 	return story, nil
 }
 
 // Feed 喂食 (消耗 UserItem food)
+// Evolve 进化
+func (s *DragonService) Evolve(userID uint, userToken string) (string, error) {
+	dragon, err := s.GetDragon(userID)
+	if err != nil { return "", err }
+	if dragon.Stage >= 4 { return "", fmt.Errorf("已是真龙之躯，无可再进") }
+
+	nextExp := (dragon.Stage + 1) * 200
+	if dragon.Exp < nextExp {
+		return "", fmt.Errorf("成长值不足，尚需修行 (当前: %d/%d)", dragon.Exp, nextExp)
+	}
+
+	stages := []string{"龙蛋", "幼龙", "青年龙", "壮年龙", "真龙"}
+	oldStageName := stages[dragon.Stage]
+	
+	// 晋升阶段
+	dragon.Stage++
+	dragon.Exp = 0 
+	dragon.MaxHunger += 50
+	dragon.MaxHappiness += 50
+	dragon.Hunger = dragon.MaxHunger
+	dragon.Happiness = dragon.MaxHappiness
+
+	newStageName := stages[dragon.Stage]
+
+	// 自动进化 BasePrompt
+	evolvedPrompt := s.triggerPromptEvolution(dragon.BasePrompt, oldStageName, newStageName)
+	if evolvedPrompt != "" {
+		dragon.BasePrompt = evolvedPrompt
+	}
+
+	if err := global.DB.Save(dragon).Error; err != nil {
+		return "", err
+	}
+	fmt.Printf("[DB Update] Dragon %d (User %d) evolved to stage %d. New BasePrompt: %s\n", dragon.ID, userID, dragon.Stage, dragon.BasePrompt)
+
+	// 自动触发新阶真身显像 (不传递参考图，让 AI 自由发挥)
+	go s.GenerateImage(userID, userToken, "")
+
+	return fmt.Sprintf("突破成功！你的龙嗣已进化为【%s】，其基因图谱已自适应演变。正在为你重塑新阶真身...", newStageName), nil
+}
+
+// triggerPromptEvolution 调用 AI 进化提示词
+func (s *DragonService) triggerPromptEvolution(oldPrompt, oldStage, newStage string) string {
+	apiToken := global.CONFIG.GetString("APIMART_TOKEN")
+	client := apimart.NewClient(apiToken)
+	
+	systemPrompt := `You are a dragon genetic specialist. Rewrite the dragon's appearance description to reflect its evolution.
+STAGES & TRANSITIONS:
+- Hatchling (幼龙): Tiny, cute, baby dragon, breaking out of a shell, curious eyes, slightly clumsy.
+- Young Dragon (青年龙): Slender, agile, and athletic. An adolescent dragon, sleek and fast. Smaller horns and wings. NOT bulky.
+- Adult Dragon (壮年龙): Massive, heavy, and extremely muscular. Large wingspan, imposing presence, thick scales and large horns.
+- True Dragon (真龙): A divine, celestial god-like entity. Radiating infinite energy, majestic and awe-inspiring scale.
+
+Requirements:
+1. KEEP the dragon's original color scheme and elemental affinity.
+2. EMPHASIZE EXTREME SCALE: 
+   - Hatchlings should be tiny enough to fit in a palm.
+   - Young dragons should be the size of a large dog or horse.
+   - Adult dragons should be massive, capable of crushing buildings or towering over trees.
+   - True dragons should be of cosmic or mountain-like scale.
+3. ABSOLUTELY FORBIDDEN: Do not mention 'egg', 'shell', or 'hatch' for Young, Adult, or True stages.
+4. Output ONLY the new description in English, under 100 words. No introductory text.`
+	userPrompt := fmt.Sprintf("Current Stage: %s, Next Stage: %s. Current Description: %s", oldStage, newStage, oldPrompt)
+	
+	newPrompt, err := client.GetChatCompletion("gpt-4o-mini", userPrompt, systemPrompt)
+	if err != nil || newPrompt == "" {
+		fmt.Printf("[Evolution Error] AI failed to respond: %v\n", err)
+		// Fallback: ensure no "egg" is carried over
+		return fmt.Sprintf("A powerful and majestic %s, radiating elemental energy with shimmering scales and a regal presence.", newStage)
+	}
+	fmt.Printf("[Evolution] Old: %s -> New: %s\n", oldPrompt, newPrompt)
+	return newPrompt
+}
+
 func (s *DragonService) Feed(userID uint) (string, error) {
 	dragon, err := s.GetDragon(userID)
 	if err != nil {
 		return "", errors.New("你还没有领养龙嗣")
 	}
 
-	if dragon.Hunger >= 100 {
-		return "", errors.New("它已经吃不下了")
+	if dragon.Hunger >= dragon.MaxHunger {
+		return "", fmt.Errorf("它已经吃不下了 (上限: %d)", dragon.MaxHunger)
 	}
 
 	// 检查是否有龙粮
@@ -208,8 +434,8 @@ func (s *DragonService) Play(userID uint) (string, error) {
 		return "", errors.New("你还没有领养龙嗣")
 	}
 
-	if dragon.Happiness >= 100 {
-		return "", errors.New("它现在心情好极了")
+	if dragon.Happiness >= dragon.MaxHappiness {
+		return "", fmt.Errorf("它已经玩得很开心了 (上限: %d)", dragon.MaxHappiness)
 	}
 
 	// 检查时间间隔
@@ -281,7 +507,7 @@ func (s *DragonService) ShareToChat(userID uint) error {
 	}
 
 	// 构造展示消息
-	content := fmt.Sprintf("✨ [真身显现] 游侠展示了他的龙宝宝 **%s**！\n\n![](%s)", dragon.Name, dragon.ImageURL)
+	content := fmt.Sprintf("[真身显现] 游侠展示了他的龙宝宝 **%s**！\n\n![](%s)", dragon.Name, dragon.ImageURL)
 	
 	msg := &model.Message{
 		Content: content,
@@ -339,15 +565,20 @@ func (s *DragonService) GetDailyTasks(userID uint) []model.UserTask {
 	today := time.Now().Format("2006-01-02")
 	
 	// 任务配置: {基础次数, 基础龙粮奖励, 基础经验奖励}
-	configs := map[string][]int{
-		"sign_in":  {1, 5, 10},   
-		"chat":     {5, 5, 15},   
-		"generate": {1, 10, 30},   
-		"share":    {1, 10, 20},   
-		"feed":     {3, 5, 10},
-		"play":     {2, 5, 15},
-		"fortune":  {1, 5, 10},
+	type taskCfg struct {
+		key string
+		vals []int
 	}
+	orderedConfigs := []taskCfg{
+		{"sign_in", []int{1, 5, 10}},
+		{"chat",    []int{5, 5, 15}},
+		{"generate",[]int{1, 10, 30}},
+		{"share",   []int{1, 10, 20}},
+		{"feed",    []int{3, 5, 10}},
+		{"play",    []int{2, 5, 15}},
+		{"fortune", []int{1, 5, 10}},
+	}
+
 
 	// 难度倍率
 	diffMult := 1.0 
@@ -359,9 +590,11 @@ func (s *DragonService) GetDailyTasks(userID uint) []model.UserTask {
 	}
 
 	var tasks []model.UserTask
-	for tt, cfg := range configs {
+	for _, cfg := range orderedConfigs {
+		tt := cfg.key
+		vals := cfg.vals
 		var task model.UserTask
-		maxProgress := int(float64(cfg[0]) * diffMult)
+		maxProgress := int(float64(vals[0]) * diffMult)
 		if maxProgress < 1 { maxProgress = 1 }
 
 		if err := global.DB.Where("user_id = ? AND task_type = ? AND date = ?", userID, tt, today).First(&task).Error; err != nil {
@@ -381,6 +614,20 @@ func (s *DragonService) GetDailyTasks(userID uint) []model.UserTask {
 		tasks = append(tasks, task)
 	}
 	return tasks
+}
+
+// CheckAllTasksCompleted 检查今日任务是否全部完成 (用于 4K 显像限制)
+func (s *DragonService) CheckAllTasksCompleted(userID uint) bool {
+	tasks := s.GetDailyTasks(userID)
+	if len(tasks) == 0 {
+		return false
+	}
+	for _, t := range tasks {
+		if t.Progress < t.MaxProgress {
+			return false
+		}
+	}
+	return true
 }
 
 // ClaimTaskReward 领取任务奖励
@@ -444,7 +691,7 @@ func (s *DragonService) ClaimTaskReward(userID uint, taskID uint) (string, error
 }
 
 // GenerateImage 提交显像任务
-func (s *DragonService) GenerateImage(userID uint, userToken string) error {
+func (s *DragonService) GenerateImage(userID uint, userToken string, refImageURL string) error {
 	dragon, err := s.GetDragon(userID)
 	if err != nil {
 		return err
@@ -463,19 +710,38 @@ func (s *DragonService) GenerateImage(userID uint, userToken string) error {
 	}
 	global.DB.Create(record)
 
-	stages := []string{"mystical egg", "cute baby dragon", "majestic young dragon", "powerful ancient dragon"}
-	currentStage := stages[0]
-	if dragon.Stage < len(stages) {
-		currentStage = stages[dragon.Stage]
+	stages := []string{"mystical egg", "hatchling dragon", "young dragon", "adult dragon", "divine true dragon"}
+	sizeKeywords := []string{
+		"tiny size, minuscule like a small toy", 
+		"hand-sized baby, cute small proportions", 
+		"horse-sized adolescent dragon, sleek medium build", 
+		"colossal mountain-sized dragon, towering over clouds", 
+		"infinite cosmic scale, god-like celestial entity",
 	}
 	
-	prompt := fmt.Sprintf("%s, %s, %s, high detail, fantasy style, glowing elements, 8k resolution", dragon.Rarity, currentStage, dragon.BasePrompt)
+	currentStage := stages[0]
+	currentSize := sizeKeywords[0]
+	if dragon.Stage >= 0 && dragon.Stage < len(stages) {
+		currentStage = stages[dragon.Stage]
+		currentSize = sizeKeywords[dragon.Stage]
+	}
+	
+	prompt := fmt.Sprintf("%s, %s, %s stage dragon, %s, extreme scale, comparison to environment, cinematic lighting, high detail, fantasy masterpiece, 8k", dragon.Rarity, currentSize, currentStage, dragon.BasePrompt)
 
+	// 设置为生成中，触发前端动画
 	global.DB.Model(&model.Dragon{}).Where("id = ?", dragon.ID).Update("image_url", "[GENERATING]")
+
+	var refImages []string
+	// 只有在手动触发且不是进化的初始显像时（即 prompt 为空或非进化阶段）才考虑参考图？
+	// 这里根据用户需求：进化时不弄参考图了。
+	// 如果是手动显像（GenerateImage 被 handler 调用且 refImageURL 为空），则不带参考图。
+	if refImageURL != "" && !strings.HasPrefix(refImageURL, "[") {
+		refImages = []string{refImageURL}
+	}
 
 	apiToken := global.CONFIG.GetString("APIMART_TOKEN")
 	client := apimart.NewClient(apiToken)
-	taskID, err := client.CreateImage(prompt, "1:1", "1k")
+	taskID, err := client.CreateImage(prompt, "1:1", "1k", refImages)
 	if err != nil {
 		return fmt.Errorf("显像任务提交失败: %v", err)
 	}
@@ -548,4 +814,206 @@ func (s *DragonService) uploadToCloud(remoteURL string, userToken string) (strin
 	}
 	json.NewDecoder(resp2.Body).Decode(&result)
 	return result.Data.URL, nil
+}
+
+// GetDragonChatHistory 获取龙的私聊记录
+func (s *DragonService) GetDragonChatHistory(userID uint, page, pageSize int) ([]model.DragonMessage, error) {
+	var dragon model.Dragon
+	if err := global.DB.Where("user_id = ? AND is_gone = false", userID).First(&dragon).Error; err != nil {
+		return nil, err
+	}
+	var msgs []model.DragonMessage
+	offset := (page - 1) * pageSize
+	err := global.DB.Where("dragon_id = ?", dragon.ID).Order("created_at desc").Offset(offset).Limit(pageSize).Find(&msgs).Error
+	
+	// 反转回正序显示
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, err
+}
+
+// ChatWithDragon 与龙进行私聊
+func (s *DragonService) PrepareDragonChatStream(userID uint, content string) (*http.Response, *model.Dragon, error) {
+	var dragon model.Dragon
+	if err := global.DB.Where("user_id = ? AND is_gone = false", userID).First(&dragon).Error; err != nil {
+		return nil, nil, errors.New("你还没有契约龙嗣")
+	}
+
+	// 1. 记录用户消息
+	userMsg := model.DragonMessage{
+		DragonID: dragon.ID,
+		UserID:   userID,
+		Role:     "user",
+		Content:  content,
+	}
+	global.DB.Create(&userMsg)
+
+	// 2. 获取最近上下文
+	var history []model.DragonMessage
+	global.DB.Where("dragon_id = ?", dragon.ID).Order("created_at desc").Limit(20).Find(&history)
+	
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+
+	// 3. 构造 AI 指令
+	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
+	
+	// 加载当前状态
+	var currentStatuses []model.DragonStatus
+	global.DB.Where("dragon_id = ? AND (expires_at IS NULL OR expires_at > ?)", dragon.ID, time.Now()).Find(&currentStatuses)
+	statusStr := "None"
+	if len(currentStatuses) > 0 {
+		statusStr = ""
+		for _, s := range currentStatuses {
+			statusStr += fmt.Sprintf("[%s: %s], ", s.Name, s.Desc)
+		}
+	}
+
+	systemPrompt := fmt.Sprintf(`You are a dragon named "%s". 
+Rarity: %s, Stage: %d.
+Stats: Hunger %d/%d, Happiness %d/%d, Exp %d.
+Current Statuses: %s.
+Memory: %s.
+Soul: %s.
+
+Guidelines:
+1. Concise, mystical tone, no emojis.
+2. If the interaction justifies a NEW status (e.g. injured, extremely happy, found a friend), append a directive at the END of your message:
+获得状态：[Name] | [DurationHours] | [Effect: attribute+/-value] | [Description]
+Example: 获得状态：小确幸 | 2 | happiness+5 | 感受到了主人的关怀，心里暖暖的。
+Supported attributes: hunger, happiness, exp.`, 
+		dragon.Name, dragon.Rarity, dragon.Stage, 
+		dragon.Hunger, dragon.MaxHunger, dragon.Happiness, dragon.MaxHappiness, dragon.Exp,
+		statusStr, dragon.Memory, dragon.Soul)
+
+	var chatMsgs []deepseek.Message
+	chatMsgs = append(chatMsgs, deepseek.Message{Role: "system", Content: systemPrompt})
+	for _, m := range history {
+		role := "user"
+		if m.Role == "dragon" { role = "assistant" }
+		chatMsgs = append(chatMsgs, deepseek.Message{Role: role, Content: m.Content})
+	}
+
+	resp, err := dsClient.StreamChat(chatMsgs)
+	return resp, &dragon, err
+}
+
+func (s *DragonService) SaveDragonReply(userID uint, dragonID uint, reply string) {
+	dragonReply := model.DragonMessage{
+		DragonID: dragonID,
+		UserID:   userID,
+		Role:     "dragon",
+		Content:  reply,
+	}
+	global.DB.Create(&dragonReply)
+
+	// 解析状态指令
+	s.parseAndApplyStatus(dragonID, reply)
+
+	// 检查演化
+	var count int64
+	global.DB.Model(&model.DragonMessage{}).Where("dragon_id = ?", dragonID).Count(&count)
+	if count >= 20 {
+		var d model.Dragon
+		global.DB.First(&d, dragonID)
+		go s.evolveDragonSoul(&d)
+	}
+}
+
+// evolveDragonSoul 总结记忆并重塑灵魂
+func (s *DragonService) evolveDragonSoul(dragon *model.Dragon) {
+	fmt.Printf("[Soul Evolution] Dragon %s is evolving its soul...\n", dragon.Name)
+	
+	var msgs []model.DragonMessage
+	global.DB.Where("dragon_id = ?", dragon.ID).Order("created_at asc").Find(&msgs)
+
+
+
+	historyStr := ""
+	for _, m := range msgs {
+		historyStr += fmt.Sprintf("%s: %s\n", m.Role, m.Content)
+	}
+
+	systemPrompt := `You are a soul architect for dragons. Analyze the conversation history and the current state.
+Update the dragon's Memory and Soul.
+- Memory: A concise summary of important events and interactions (under 100 words).
+- Soul: A description of its personality, temperament, and current emotional state (under 50 words).
+
+Output ONLY in JSON format: {"memory": "...", "soul": "..."}`
+
+	userPrompt := fmt.Sprintf("Current Memory: %s\nCurrent Soul: %s\n\nNew Conversations:\n%s", dragon.Memory, dragon.Soul, historyStr)
+	
+	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
+	aiMsgs := []deepseek.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+	resp, err := dsClient.Chat(aiMsgs)
+	if err != nil {
+		fmt.Printf("[Soul Evolution] Error: %v\n", err)
+		return
+	}
+
+	var result struct {
+		Memory string `json:"memory"`
+		Soul   string `json:"soul"`
+	}
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		// 尝试修复非 JSON 返回
+		fmt.Printf("[Soul Evolution] JSON Parse Error: %v\n", err)
+		return
+	}
+
+	// 更新龙的数据
+	dragon.Memory = result.Memory
+	dragon.Soul = result.Soul
+	global.DB.Save(dragon)
+
+	// 减少上下文：保留最近 10 条，删除旧消息
+	var last10 []model.DragonMessage
+	global.DB.Where("dragon_id = ?", dragon.ID).Order("created_at desc").Limit(10).Find(&last10)
+	
+	if len(last10) > 0 {
+		oldestID := last10[len(last10)-1].ID
+		global.DB.Where("dragon_id = ? AND id < ?", dragon.ID, oldestID).Unscoped().Delete(&model.DragonMessage{})
+	}
+
+	fmt.Printf("[Soul Evolution] Dragon %s soul evolved. New Soul: %s\n", dragon.Name, dragon.Soul)
+}
+
+func (s *DragonService) parseAndApplyStatus(dragonID uint, text string) {
+	if !strings.Contains(text, "获得状态：") {
+		return
+	}
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "获得状态：") {
+			parts := strings.Split(line, "获得状态：")
+			if len(parts) > 1 {
+				directive := strings.TrimSpace(parts[1])
+				dParts := strings.Split(directive, "|")
+				if len(dParts) >= 4 {
+					name := strings.TrimSpace(dParts[0])
+					duration, _ := strconv.Atoi(strings.TrimSpace(dParts[1]))
+					effect := strings.TrimSpace(dParts[2])
+					desc := strings.TrimSpace(dParts[3])
+
+					if duration <= 0 { duration = 1 }
+
+					expiresAt := time.Now().Add(time.Duration(duration) * time.Hour)
+					status := model.DragonStatus{
+						DragonID:  dragonID,
+						Name:      name,
+						Desc:      desc,
+						Effect:    effect,
+						ExpiresAt: &expiresAt,
+					}
+					global.DB.Create(&status)
+					fmt.Printf("[Dragon Status] Dragon %d acquired status: %s via event/chat\n", dragonID, name)
+				}
+			}
+		}
+	}
 }

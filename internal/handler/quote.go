@@ -20,11 +20,11 @@ func (h *QuoteHandler) Get(c *gin.Context) {
 
 	var systemPrompt, userPrompt string
 	if isSecret {
-		systemPrompt = "你是一位古典诗人，擅长写含蓄而动人的情话。"
+		systemPrompt = "你是一位古典诗人，擅长写含蓄而动人的情话。严禁使用任何 Emoji 表情符号。"
 		userPrompt = `请生成一句含蓄优美的情话（不超过30字），然后用一句幽默接地气的大白话来解释它的真实含义。
 返回格式（严格JSON）：{"quote":"...","explain":"...","type":"secret"}`
 	} else {
-		systemPrompt = "你是一位东方智者，擅长生成富含哲理的警句。"
+		systemPrompt = "你是一位东方智者，擅长生成富含哲理的警句。严禁使用任何 Emoji 表情符号。"
 		userPrompt = `请生成一句富有哲理的话（不超过30字，可以是原创或改编自名言），然后用一句幽默接地气的大白话来解释它的真实含义（可以适度诙谐调侃）。
 返回格式（严格JSON）：{"quote":"...","explain":"...","type":"wisdom"}`
 	}

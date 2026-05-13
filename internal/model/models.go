@@ -49,7 +49,7 @@ type Archive struct {
 	Base
 	Title   string `gorm:"type:varchar(255);not null" json:"title"`
 	Content string `gorm:"type:text" json:"content"`
-	Date    string `gorm:"type:varchar(20);uniqueIndex" json:"date"`
+	Date    string `gorm:"type:varchar(20);index" json:"date"`
 	Type    int    `gorm:"default:0" json:"type"` // 0: 编年史, 1: 个人传记
 }
 
@@ -68,14 +68,39 @@ type Dragon struct {
 	Rarity       string     `gorm:"type:varchar(20)" json:"rarity"` // 'common', 'rare', 'epic'
 	Stage        int        `gorm:"default:0" json:"stage"`        // 0:蛋, 1:幼崽, 2:雏龙, 3:巨龙
 	Hunger       int        `gorm:"default:50" json:"hunger"`
+	MaxHunger    int        `gorm:"default:100" json:"max_hunger"`
 	Happiness    int        `gorm:"default:50" json:"happiness"`
+	MaxHappiness int        `gorm:"default:100" json:"max_happiness"`
 	Exp          int        `gorm:"default:0" json:"exp"`
 	LastFedAt    *time.Time `json:"last_fed_at"`
 	LastPlayedAt *time.Time `json:"last_played_at"`
 	ImageURL     string     `gorm:"type:varchar(255)" json:"image_url"`
 	BasePrompt   string     `gorm:"type:text" json:"base_prompt"`
 	Seed         int64      `json:"seed"`
+	Personality  string     `gorm:"type:varchar(100)" json:"personality"` // 性格标签 (如: 傲娇, 憨厚)
+	Memory       string     `gorm:"type:text" json:"memory"`              // 龙的长期记忆（由 AI 定期总结）
+	Soul         string     `gorm:"type:text" json:"soul"`                // 龙 the 灵魂特质（性格、喜好、当前状态描述）
 	IsGone       bool       `gorm:"default:false" json:"is_gone"`
+	Statuses     []DragonStatus `gorm:"foreignKey:DragonID" json:"statuses"`
+	DailyEventCount int        `gorm:"default:0" json:"daily_event_count"`
+	LastEventAt     *time.Time `json:"last_event_at"`
+}
+
+type DragonStatus struct {
+	Base
+	DragonID  uint       `gorm:"index" json:"dragon_id"`
+	Name      string     `gorm:"type:varchar(100)" json:"name"`
+	Desc      string     `gorm:"type:varchar(255)" json:"desc"`
+	Effect    string     `gorm:"type:varchar(100)" json:"effect"` // 格式: hunger-10, happiness+5 等
+	ExpiresAt *time.Time `json:"expires_at"`
+}
+
+type DragonMessage struct {
+	Base
+	DragonID uint   `gorm:"index" json:"dragon_id"`
+	UserID   uint   `gorm:"index" json:"user_id"`
+	Role     string `gorm:"type:varchar(20)" json:"role"` // 'user' 或 'dragon'
+	Content  string `gorm:"type:text" json:"content"`
 }
 
 type UserItem struct {

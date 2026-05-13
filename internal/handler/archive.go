@@ -62,9 +62,15 @@ func (h *ArchiveHandler) ManualGenerate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "史诗已成"})
 }
 
-// Analyze 唤醒架构师进行代码分析
+// Analyze 唤醒架构师进行代码分析并优化草稿
 func (h *ArchiveHandler) Analyze(c *gin.Context) {
-	suggestion, err := h.archiveService.AnalyzeCodebase()
+	var req struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	_ = c.ShouldBindJSON(&req) // 允许为空
+
+	suggestion, err := h.archiveService.AnalyzeCodebase(req.Title, req.Content)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -80,5 +86,14 @@ func (h *ArchiveHandler) GetManifesto(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"content": content})
+}
+
+// UpdateManifesto 手动触发架构总览更新
+func (h *ArchiveHandler) UpdateManifesto(c *gin.Context) {
+	if err := h.archiveService.UpdateManifestoFile(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "系统架构总览已成功演进"})
 }
 

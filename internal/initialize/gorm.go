@@ -36,6 +36,8 @@ func InitDB() {
 		&model.UserItem{},
 		&model.UserTask{},
 		&model.FortuneRecord{},
+		&model.DragonMessage{},
+		&model.DragonStatus{},
 	)
 	if err != nil {
 		log.Fatalf("Failed to auto-migrate models: %v", err)

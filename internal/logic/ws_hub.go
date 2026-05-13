@@ -104,3 +104,13 @@ func (h *Hub) BroadcastMessage(msg *model.Message) {
 	data, _ := json.Marshal(msg)
 	h.broadcast <- data
 }
+
+// BroadcastChunk 广播消息片段 (用于流式输出)
+func (h *Hub) BroadcastChunk(msgID uint, chunk string) {
+	data, _ := json.Marshal(map[string]interface{}{
+		"type":    "chunk",
+		"id":      msgID,
+		"content": chunk,
+	})
+	h.broadcast <- data
+}

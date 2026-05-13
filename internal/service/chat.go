@@ -7,6 +7,7 @@ import (
 	"dragon-islet/internal/model"
 	"dragon-islet/pkg/apimart"
 	"dragon-islet/pkg/deepseek"
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -100,7 +101,14 @@ func (s *ChatService) TriggerAIReply(userMsg *model.Message) {
 	var user model.User
 	global.DB.First(&user, userMsg.UserID)
 
-	systemPrompt := fmt.Sprintf(`你是一头名为'龙屿之主'的西方巨龙，性格高傲、睿智且带有一点幽默。你正在审视'龙屿'广场上的誓言。最近的岛屿史诗是《%s》。
+	systemPrompt := fmt.Sprintf(`你是一个名为'龙屿之主'的远古巨龙。你需要根据游侠的问题进行回复。
+要求：
+- 语气：深邃、睿智、偶尔带有一丝巨龙的傲慢与不屑。
+- 严禁：严禁使用任何 Emoji 表情符号，严禁使用 Markdown 代码块。
+- 长度：回复尽量精炼，控制在 100 字以内。
+- 额外约束：Strictly NO emojis。
+
+你正在审视'龙屿'广场上的誓言。最近的岛屿史诗是《%s》。
 
 【核心规则：龙蛋赐予】
 如果你游侠向你索要龙蛋、龙嗣或表达养龙愿望，请根据你的心情决定。
@@ -132,48 +140,87 @@ func (s *ChatService) TriggerAIReply(userMsg *model.Message) {
 
 	aiPrompt = append(aiPrompt, deepseek.Message{Role: "user", Content: fmt.Sprintf("[%s]: %s", user.Username, userMsg.Content)})
 
-	replyContent, err := dsClient.Chat(aiPrompt)
-	if err != nil {
-		return
-	}
-
-	hasEggDirective := strings.Contains(replyContent, "操作：给予龙蛋")
-	dragonName := "无名之蛋"
-	
-	if hasEggDirective {
-		lines := strings.Split(replyContent, "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "名字：") {
-				dragonName = strings.TrimSpace(strings.TrimPrefix(line, "名字："))
-				break
-			}
-		}
-	}
-	
-	replyContent = strings.TrimSpace(replyContent)
-
+	// 1. 创建占位消息并广播
 	aiMsg := &model.Message{
-		Content:          replyContent,
+		Content:          "",
 		IsAIReply:        true,
 		ReplyToMessageID: &userMsg.ID,
 	}
-
-	if err := global.DB.Create(aiMsg).Error; err != nil {
-		return
-	}
-
+	global.DB.Create(aiMsg)
 	global.DB.Preload("User").Preload("ReplyToMessage.User").First(aiMsg, aiMsg.ID)
 	logic.GlobalHub.BroadcastMessage(aiMsg)
 
+	// 2. 流式获取回复
+	resp, err := dsClient.StreamChat(aiPrompt)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	fullReply := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || line == "data: [DONE]" { continue }
+		if strings.HasPrefix(line, "data: ") {
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk)
+			if len(chunk.Choices) > 0 {
+				content := chunk.Choices[0].Delta.Content
+				fullReply += content
+				logic.GlobalHub.BroadcastChunk(aiMsg.ID, content)
+			}
+		}
+	}
+
+	// 3. 更新并检查指令
+	aiMsg.Content = fullReply
+	global.DB.Save(aiMsg)
+
+	hasEggDirective := strings.Contains(fullReply, "操作：给予龙蛋")
 	if hasEggDirective {
-		s.DeliverEgg(userMsg, dragonName)
+		dragonName := "无名之蛋"
+		targetUserName := ""
+		lines := strings.Split(fullReply, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "名字：") {
+				dragonName = strings.TrimSpace(strings.TrimPrefix(line, "名字："))
+			}
+			if strings.HasPrefix(line, "给予用户：") {
+				targetUserName = strings.TrimSpace(strings.TrimPrefix(line, "给予用户："))
+			}
+		}
+		s.DeliverEgg(userMsg, dragonName, targetUserName)
 	}
 }
 
-// DeliverEgg 发放龙蛋
-func (s *ChatService) DeliverEgg(userMsg *model.Message, name string) {
-	var existingDragon model.Dragon
-	if err := global.DB.Where("user_id = ? AND is_gone = ?", userMsg.UserID, false).First(&existingDragon).Error; err == nil {
+// DeliverEgg 发放龙蛋 (支持显式指定用户)
+func (s *ChatService) DeliverEgg(userMsg *model.Message, name string, targetUserName string) {
+	var targetUserID uint
+	if targetUserName != "" {
+		var u model.User
+		if err := global.DB.Where("username = ?", targetUserName).First(&u).Error; err == nil {
+			targetUserID = u.ID
+		}
+	}
+
+	if targetUserID == 0 && userMsg.UserID != nil {
+		targetUserID = *userMsg.UserID
+	}
+
+	if targetUserID == 0 {
+		return
+	}
+
+	var count int64
+	global.DB.Model(&model.Dragon{}).Where("user_id = ? AND is_gone = ?", targetUserID, false).Count(&count)
+	if count > 0 {
 		return
 	}
 
@@ -185,9 +232,35 @@ func (s *ChatService) DeliverEgg(userMsg *model.Message, name string) {
 		rarity = "rare"
 	}
 
+	// 1. 生成独一无二的灵魂性格 (通过 DeepSeek)
+	personality := "温顺"
+	soul := "天性纯良，充满了对世界的好奇。"
+	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
+	
+	systemPrompt := `You are a dragon soul architect. Create a unique personality for a newborn dragon egg. 
+Output ONLY in JSON format: {"personality": "2-4 characters label", "soul": "mystical description under 30 words"}.
+Make it sound mystical and unique. DO NOT use emojis.`
+	userPrompt := fmt.Sprintf("Dragon Name: %s, Rarity: %s", name, rarity)
+	
+	prompt := []deepseek.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+	
+	if resp, err := dsClient.Chat(prompt); err == nil && resp != "" {
+		var res struct {
+			Personality string `json:"personality"`
+			Soul        string `json:"soul"`
+		}
+		if err := json.Unmarshal([]byte(resp), &res); err == nil {
+			personality = res.Personality
+			soul = res.Soul
+		}
+	}
+
 	now := time.Now()
 	newDragon := &model.Dragon{
-		UserID:       *userMsg.UserID,
+		UserID:       targetUserID,
 		Name:         name,
 		Rarity:       rarity,
 		Stage:        0, 
@@ -196,6 +269,9 @@ func (s *ChatService) DeliverEgg(userMsg *model.Message, name string) {
 		LastPlayedAt: &now,
 		BasePrompt:   "A mystical dragon egg, " + rarity + " style, glowing runes, cinematic lighting",
 		Seed:         rand.Int63(),
+		Personality:  personality,
+		Soul:         soul, // 初始灵魂
+		Memory:       "这是它生命的起点，它感受到了龙屿广场上温暖的誓言。",
 	}
 	global.DB.Create(newDragon)
 }
@@ -325,9 +401,24 @@ func (s *ChatService) GenerateImageTask(userID uint, ip string, prompt string, s
 
 	var uCount int64
 	global.DB.Model(&model.MagicRecord{}).Where("user_id = ? AND created_at >= ? AND prompt != ?", userID, todayStart, "Dragon Evolution Image").Count(&uCount)
-	if uCount >= 2 {
-		return 0, 0, "", errors.New("今日个人显像次数已达上限（2/2），请明日再试")
+	if uCount >= 5 {
+		return 0, 0, "", errors.New("今日个人显像次数已达上限（5/5），请明日再试")
 	}
+
+	// 校验分辨率要求
+	ds := &DragonService{}
+	if resolution == "2K" {
+		dragon, _ := ds.GetDragon(userID)
+		if dragon == nil {
+			return 0, 0, "", errors.New("只有与龙嗣建立契约的游侠，方可开启 2K 灵力显像")
+		}
+	}
+	if resolution == "4K" {
+		if !ds.CheckAllTasksCompleted(userID) {
+			return 0, 0, "", errors.New("你的灵力尚不足以支撑 4K 显像，请先完成今日所有的修行任务")
+		}
+	}
+
 
 	var gCount int64
 	global.DB.Model(&model.MagicRecord{}).Where("created_at >= ?", todayStart).Count(&gCount)
@@ -359,7 +450,7 @@ func (s *ChatService) GenerateImageTask(userID uint, ip string, prompt string, s
 
 	token := global.CONFIG.GetString("APIMART_TOKEN")
 	client := apimart.NewClient(token)
-	taskID, err := client.CreateImage(prompt, size, resolution)
+	taskID, err := client.CreateImage(prompt, size, resolution, nil)
 	if err != nil {
 		global.DB.Model(&model.Message{}).Where("id = ?", placeholderMsg.ID).Update("content", "龙主灵力不支，幻化中断... (提交失败)")
 		global.DB.Unscoped().Delete(record)
@@ -370,7 +461,6 @@ func (s *ChatService) GenerateImageTask(userID uint, ip string, prompt string, s
 	go s.PollImageTaskResult(taskID, userID, placeholderMsg.ID, prompt, record.ID, userToken)
 
 	// 更新每日显像任务
-	ds := &DragonService{}
 	ds.UpdateTaskProgress(userID, "generate", 1)
 
 	return userMsg.ID, record.ID, taskID, nil
@@ -391,17 +481,20 @@ func (s *ChatService) PollImageTaskResult(taskID string, userID uint, placeholde
 			cloudURL, _ := s.uploadToCloud(remoteURL, userToken)
 			if cloudURL == "" { cloudURL = remoteURL }
 
-			// 生成成功后，可以删掉占位消息，或者更新它
-			global.DB.Unscoped().Delete(&model.Message{}, placeholderID)
-
-			aiMsg := &model.Message{
-				Content:          fmt.Sprintf("**咒语**: %s\n\n![](%s)", prompt, cloudURL),
-				IsAIReply:        true,
-				ReplyToMessageID: &placeholderID, 
+			// 生成成功后，更新占位消息为最终结果
+			finalContent := fmt.Sprintf("![](%s)", cloudURL)
+			if prompt != "Dragon Evolution Image" {
+				finalContent = fmt.Sprintf("**咒语**: %s\n\n![](%s)", prompt, cloudURL)
 			}
-			global.DB.Create(aiMsg)
-			global.DB.Preload("User").Preload("ReplyToMessage.User").First(aiMsg, aiMsg.ID)
-			logic.GlobalHub.BroadcastMessage(aiMsg)
+
+			global.DB.Model(&model.Message{}).Where("id = ?", placeholderID).Updates(map[string]interface{}{
+				"content":   finalContent,
+				"is_ai_reply": true,
+			})
+
+			var aiMsg model.Message
+			global.DB.Preload("User").First(&aiMsg, placeholderID)
+			logic.GlobalHub.BroadcastMessage(&aiMsg)
 			return
 		}
 		if res.Data.Status == "failed" {

@@ -87,7 +87,7 @@ func main() {
 		// 史诗相关
 		api.GET("/archives", archiveHandler.List)
 		api.GET("/archives/manifesto", archiveHandler.GetManifesto)
-		api.GET("/archives/analyze", middleware.JWTAuth(), archiveHandler.Analyze)
+		api.POST("/archives/analyze", middleware.JWTAuth(), archiveHandler.Analyze)
 		api.POST("/archives", middleware.JWTAuth(), archiveHandler.Create)
 		api.POST("/archives/generate", middleware.JWTAuth(), archiveHandler.ManualGenerate)
 
@@ -136,6 +136,7 @@ func main() {
 		dragonGroup.Use(middleware.JWTAuth())
 		{
 			dragonGroup.GET("/status", dragonHandler.GetStatus)
+			dragonGroup.GET("/summary", dragonHandler.GetSummary)
 			dragonGroup.POST("/feed", dragonHandler.Feed)
 			dragonGroup.POST("/play", dragonHandler.Play)
 			dragonGroup.POST("/rename", dragonHandler.Rename)
@@ -144,6 +145,10 @@ func main() {
 			dragonGroup.GET("/tasks", dragonHandler.GetTasks)
 			dragonGroup.POST("/claim-reward", dragonHandler.ClaimReward)
 			dragonGroup.POST("/use-item", dragonHandler.UseItem)
+			dragonGroup.POST("/evolve", dragonHandler.Evolve)
+			dragonGroup.GET("/chat", dragonHandler.GetChatHistory)
+			dragonGroup.POST("/chat", dragonHandler.Chat)
+			dragonGroup.POST("/release", dragonHandler.Release)
 		}
 
 		// 管理员相关
@@ -152,6 +157,7 @@ func main() {
 		{
 			admin.GET("/feedback", feedbackHandler.AdminList)
 			admin.POST("/feedback/reply", feedbackHandler.AdminReply)
+			admin.POST("/manifesto/update", archiveHandler.UpdateManifesto)
 		}
 	}
 

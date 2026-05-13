@@ -22,13 +22,14 @@ func NewClient(token string) *Client {
 }
 
 type ImageRequest struct {
-	Model            string `json:"model"`
-	Prompt           string `json:"prompt"`
-	Size             string `json:"size"`
-	Resolution       string `json:"resolution"`
-	Quality          string `json:"quality"`
-	N                int    `json:"n"`
-	OfficialFallback bool   `json:"official_fallback"`
+	Model            string   `json:"model"`
+	Prompt           string   `json:"prompt"`
+	Size             string   `json:"size"`
+	Resolution       string   `json:"resolution"`
+	Quality          string   `json:"quality"`
+	N                int      `json:"n"`
+	OfficialFallback bool     `json:"official_fallback"`
+	ImageURLs        []string `json:"image_urls,omitempty"`
 }
 
 type TaskResponse struct {
@@ -56,13 +57,17 @@ type ResultResponse struct {
 	} `json:"data"`
 }
 
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type ChatRequest struct {
-	Model    string `json:"model"`
-	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"messages"`
-	Temperature float64 `json:"temperature"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Temperature float64       `json:"temperature"`
+	Stream      bool          `json:"stream"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
 }
 
 type ChatResponse struct {
@@ -74,7 +79,7 @@ type ChatResponse struct {
 }
 
 // CreateImage 提交生成任务
-func (c *Client) CreateImage(prompt string, size string, resolution string) (string, error) {
+func (c *Client) CreateImage(prompt string, size string, resolution string, imageURLs []string) (string, error) {
 	url := fmt.Sprintf("%s/images/generations", c.BaseURL)
 	if size == "" {
 		size = "1:1"
@@ -89,6 +94,7 @@ func (c *Client) CreateImage(prompt string, size string, resolution string) (str
 		Resolution:       resolution,
 		N:                1,
 		OfficialFallback: true,
+		ImageURLs:        imageURLs,
 	}
 
 	jsonData, _ := json.Marshal(payload)
@@ -142,21 +148,15 @@ func (c *Client) GetTaskStatus(taskID string) (*ResultResponse, error) {
 	return &rr, nil
 }
 
-// GetChatCompletion 获取 AI 文本回复
-func (c *Client) GetChatCompletion(model string, prompt string, systemPrompt string) (string, error) {
+// GetChatCompletionWithHistory 获取带历史背景的 AI 回复
+func (c *Client) GetChatCompletionWithHistory(model string, messages []ChatMessage) (string, error) {
 	url := fmt.Sprintf("%s/chat/completions", c.BaseURL)
 	payload := ChatRequest{
-		Model: model,
+		Model:       model,
+		Messages:    messages,
 		Temperature: 0.7,
+		Stream:      false,
 	}
-	payload.Messages = append(payload.Messages, struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "system", Content: systemPrompt})
-	payload.Messages = append(payload.Messages, struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}{Role: "user", Content: prompt})
 
 	jsonData, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -170,13 +170,26 @@ func (c *Client) GetChatCompletion(model string, prompt string, systemPrompt str
 	defer resp.Body.Close()
 
 	body, _ := ioutil.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("API 灵力不稳 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
 	var cr ChatResponse
 	if err := json.Unmarshal(body, &cr); err != nil {
-		return "", err
+		return "", fmt.Errorf("神谕解析失败 (JSON Error): %v | Body: %s", err, string(body))
 	}
 
 	if len(cr.Choices) > 0 {
 		return cr.Choices[0].Message.Content, nil
 	}
 	return "", errors.New("AI 未能降下神启")
+}
+
+// GetChatCompletion 获取 AI 文本回复 (单次)
+func (c *Client) GetChatCompletion(model string, prompt string, systemPrompt string) (string, error) {
+	messages := []ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: prompt},
+	}
+	return c.GetChatCompletionWithHistory(model, messages)
 }

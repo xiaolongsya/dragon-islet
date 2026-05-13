@@ -59,11 +59,11 @@ func (s *AuthService) Register(username, password, phone, code string) error {
 	return nil
 }
 
-// Login 用户名密码登录
-func (s *AuthService) Login(username, password string) (string, *model.User, error) {
+// Login 支持名号或手机号登录
+func (s *AuthService) Login(identity, password string) (string, *model.User, error) {
 	var user model.User
-	if err := global.DB.Where("username = ?", username).First(&user).Error; err != nil {
-		return "", nil, errors.New("游侠未被记载（用户不存在）")
+	if err := global.DB.Where("username = ? OR phone = ?", identity, identity).First(&user).Error; err != nil {
+		return "", nil, errors.New("游侠未被记载（名号或手机号不存在）")
 	}
 
 	// 验证密码
