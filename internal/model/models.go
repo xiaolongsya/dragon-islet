@@ -103,6 +103,15 @@ type DragonMessage struct {
 	Content  string `gorm:"type:text" json:"content"`
 }
 
+type UserFortune struct {
+	Base
+	UserID  uint   `gorm:"index" json:"user_id"`
+	Date    string `gorm:"type:varchar(20);index" json:"date"` // 格式: 2006-01-02
+	Quote   string `gorm:"type:text" json:"quote"`
+	Explain string `gorm:"type:text" json:"explain"`
+	Type    string `gorm:"type:varchar(20)" json:"type"`
+}
+
 type UserItem struct {
 	Base
 	UserID uint   `gorm:"index" json:"user_id"`
