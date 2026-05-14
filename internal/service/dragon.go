@@ -115,31 +115,54 @@ func (s *DragonService) GetItems(userID uint) ([]model.UserItem, error) {
 }
 
 // UseItem 使用道具
-func (s *DragonService) UseItem(userID uint, itemType string) (string, error) {
+func (s *DragonService) UseItem(userID uint, itemType string, itemName string) (string, error) {
 	dragon, err := s.GetDragon(userID)
 	if err != nil {
 		return "", errors.New("你还没有领养龙嗣")
 	}
 
 	var item model.UserItem
-	if err := global.DB.Where("user_id = ? AND type = ?", userID, itemType).First(&item).Error; err != nil || item.Count <= 0 {
+	query := global.DB.Where("user_id = ?", userID)
+	if itemName != "" {
+		query = query.Where("name = ?", itemName)
+	} else {
+		query = query.Where("type = ?", itemType)
+	}
+	
+	if err := query.First(&item).Error; err != nil || item.Count <= 0 {
 		return "", errors.New("你囊中并无此物")
 	}
 
 	msg := ""
-	switch itemType {
-	case "exp_pill":
-		dragon.Exp += 50
-		msg = "龙宝宝吞下了龙髓丹，周身灵力激荡，成长值显著提升！"
-	case "sacrifice_stone":
-		if dragon.Hunger < 30 {
-			return "", errors.New("龙宝宝现在太虚弱了，无法承受献祭之石的力量")
+	if itemType == "custom" || (itemType == "" && itemName != "") {
+		if item.Category != "usable" {
+			return "", errors.New("此物仅供收藏，无法直接使用")
 		}
-		dragon.Hunger -= 30
-		dragon.Exp += 100
-		msg = "献祭之石发出了幽暗的光芒，虽然饱食度骤降，但龙宝宝的力量得到了质的飞跃！"
-	default:
-		return "", errors.New("此物尚不知如何使用")
+		// 默认自定义道具效果：提升少量经验与心情
+		dragon.Exp += 15
+		dragon.Happiness += 10
+		if dragon.Happiness > 100 { dragon.Happiness = 100 }
+		msg = fmt.Sprintf("你使用了【%s】，龙宝宝感受到了一丝奇特的灵力，成长值与心情都有所提升。", item.Name)
+	} else {
+		switch itemType {
+		case "food":
+			// 虽然前端有单独的投喂，但也可以通过包裹使用
+			dragon.Hunger += 20
+			if dragon.Hunger > 100 { dragon.Hunger = 100 }
+			msg = "龙宝宝吃下了龙粮，饱食度得到了补充。"
+		case "exp_pill":
+			dragon.Exp += 50
+			msg = "龙宝宝吞下了龙髓丹，周身灵力激荡，成长值显著提升！"
+		case "sacrifice_stone":
+			if dragon.Hunger < 30 {
+				return "", errors.New("龙宝宝现在太虚弱了，无法承受献祭之石的力量")
+			}
+			dragon.Hunger -= 30
+			dragon.Exp += 100
+			msg = "献祭之石发出了幽暗的光芒，虽然饱食度骤降，但龙宝宝的力量得到了质的飞跃！"
+		default:
+			return "", errors.New("此物尚不知如何使用")
+		}
 	}
 
 	// 消耗道具
@@ -208,6 +231,22 @@ func (s *DragonService) TriggerRandomEvent(userID uint, actionType string) (stri
 		return "今日已阅尽世间奇遇，且去修行，待明日旭日东升，再寻机缘。", nil
 	}
 
+	// 0. 计算状态加成 (atk 增加胜率, luck 增加好运)
+	atkBonus := 0
+	luckBonus := 0
+	statusInfo := ""
+	for _, st := range dragon.Statuses {
+		statusInfo += fmt.Sprintf("[%s: %s], ", st.Name, st.Desc)
+		if strings.Contains(st.Effect, "atk+") {
+			val, _ := strconv.Atoi(strings.Split(st.Effect, "atk+")[1])
+			atkBonus += val
+		} else if strings.Contains(st.Effect, "luck+") {
+			val, _ := strconv.Atoi(strings.Split(st.Effect, "luck+")[1])
+			luckBonus += val
+		}
+	}
+	if statusInfo == "" { statusInfo = "无特殊状态" }
+
 	// 1. 确定动态奖励池与权重
 	isDistressed := dragon.Hunger < 20 || dragon.Happiness < 20
 	
@@ -228,10 +267,17 @@ func (s *DragonService) TriggerRandomEvent(userID uint, actionType string) (stri
 
 	if isDistressed {
 		// 状态不佳时，加入负面事件
+		badWeight := 40 - atkBonus - luckBonus // atk 和 luck 降低厄运概率
+		if badWeight < 5 { badWeight = 5 }
 		rewardPool = append(rewardPool, 
-			Reward{Type: "stat", Value: "exp", Amt: -30, Name: "灵力溃散", Weight: 40},
-			Reward{Type: "status", Value: "bad_status", Amt: 0, Name: "负面诅咒", Weight: 50},
+			Reward{Type: "stat", Value: "exp", Amt: -30, Name: "灵力溃散", Weight: badWeight},
+			Reward{Type: "status", Value: "bad_status", Amt: 0, Name: "负面诅咒", Weight: badWeight + 10},
 		)
+	} else {
+		// 状态良好时，额外好运加成
+		for i := range rewardPool {
+			rewardPool[i].Weight += luckBonus / 2
+		}
 	}
 
 	// 加权随机抽取
@@ -247,21 +293,26 @@ func (s *DragonService) TriggerRandomEvent(userID uint, actionType string) (stri
 		}
 	}
 
-	// 2. 召唤 AI 讲述奇遇
 	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
 	
 	stateDesc := "状态良好"
 	if isDistressed { stateDesc = "极度饥饿或心情低落" }
 
-	systemPrompt := fmt.Sprintf("你是一位龙屿世界的吟游诗人。当前龙的状态：%s。请根据用户的行为和获得的奖励（可能是惩罚），写一段50字以内的奇遇描述。严禁使用 Emoji。\n", stateDesc)
-	if reward.Type == "status" {
-		systemPrompt += "特殊指令：描述末尾追加：获得状态：[名称] | [持续小时] | [效果: attr+/-val] | [描述]。"
-		if isDistressed {
-			systemPrompt += "由于龙状态不佳，请设计一个【负面状态】，如'虚弱'、'自闭'或'伤口感染'。"
-		}
-	} else {
-		systemPrompt += "格式：[奇遇内容] 获得（或失去）：[奖励名称]"
-	}
+	systemPrompt := fmt.Sprintf(`你是一位龙屿世界的吟游诗人。
+当前龙的状态：%s
+当前活跃加成：%s (攻击加成: %d, 幸运加成: %d)
+请根据用户的行为和获得的奖励（可能是惩罚），写一段 50 字以内的奇遇描述。
+如果奖励是好的且攻击/幸运很高，可以描述为龙凭借自身能力克服了困难。
+严禁使用 Emoji。`, stateDesc, statusInfo, atkBonus, luckBonus)
+	systemPrompt += `格式要求：
+1. 奇遇描述请保持在 50 字以内。
+2. 在描述之后，换行输出奖励指令：
+获得物品：[物品名] (说明：[详细描述])
+得到[数值]点成长值
+
+注：
+- 物品说明中如果包含“使用后可...”则该物品将被归类为“可以使用”，否则为“收藏品”。
+- 如果没有获得物品，可以不输出“获得物品”行。`
 
 	userPrompt := fmt.Sprintf("动作：%s，龙的名字：%s，品质：%s，获得的奖励：%s", actionType, dragon.Name, dragon.Rarity, reward.Name)
 	
@@ -273,25 +324,84 @@ func (s *DragonService) TriggerRandomEvent(userID uint, actionType string) (stri
 		story = fmt.Sprintf("龙宝宝在%s时显得格外兴奋，似乎触发了某种远古共鸣！获得：%s", actionType, reward.Name)
 	}
 
-	// 3. 发放奖励
-	if reward.Type == "status" {
-		// 状态奖励的处理逻辑已经在下方的 SaveDragonReply 类似的解析中，
-		// 但为了非聊天动作也能解析，我们需要在这里手动调用一次解析逻辑。
-		s.parseAndApplyStatus(dragon.ID, story)
-	} else if reward.Type == "stat" {
+	// 3. 解析奖励指令
+	// a. 成长值
+	if strings.Contains(story, "得到") && strings.Contains(story, "点成长值") {
+		parts := strings.Split(story, "得到")
+		if len(parts) > 1 {
+			valStr := strings.Split(parts[1], "点成长值")[0]
+			valStr = strings.TrimSpace(valStr)
+			val, _ := strconv.Atoi(valStr)
+			dragon.Exp += val
+		}
+	}
+
+	// b. 物品
+	if strings.Contains(story, "获得物品：") {
+		line := ""
+		for _, l := range strings.Split(story, "\n") {
+			if strings.Contains(l, "获得物品：") {
+				line = l
+				break
+			}
+		}
+		if line != "" {
+			parts := strings.Split(line, "获得物品：")
+			if len(parts) > 1 {
+				content := strings.TrimSpace(parts[1])
+				name := strings.Split(content, "(")[0]
+				name = strings.TrimSpace(name)
+				desc := ""
+				if strings.Contains(content, "说明：") {
+					desc = strings.Split(content, "说明：")[1]
+					desc = strings.TrimSuffix(desc, ")")
+					desc = strings.TrimSpace(desc)
+				}
+
+				category := "collectible"
+				if strings.Contains(desc, "使用后") || strings.Contains(desc, "增加") {
+					category = "usable"
+				}
+
+				var item model.UserItem
+				// 具有相同名称的物品堆叠
+				if err := global.DB.Where("user_id = ? AND name = ?", userID, name).First(&item).Error; err != nil {
+					item = model.UserItem{
+						UserID:   userID,
+						Type:     "custom",
+						Name:     name,
+						Desc:     desc,
+						Category: category,
+						Count:    1,
+					}
+					global.DB.Create(&item)
+				} else {
+					item.Count++
+					global.DB.Save(&item)
+				}
+				fmt.Printf("[Random Event] User %d obtained item: %s (%s)\n", userID, name, category)
+			}
+		}
+	}
+
+	// c. 状态 (保留原有的状态解析)
+	s.parseAndApplyStatus(dragon.ID, story)
+
+	// 处理预定义的奖励 (如果 AI 没有给出特定指令，则兜底)
+	if reward.Type == "stat" && !strings.Contains(story, "成长值") {
 		if reward.Value == "exp" { dragon.Exp += reward.Amt }
 		if reward.Value == "happiness" { dragon.Happiness += reward.Amt }
-		global.DB.Save(dragon)
-	} else if reward.Type == "item" {
+	} else if reward.Type == "item" && !strings.Contains(story, "获得物品") {
 		var item model.UserItem
 		if err := global.DB.Where("user_id = ? AND type = ?", userID, reward.Value).First(&item).Error; err != nil {
-			item = model.UserItem{UserID: userID, Type: reward.Value, Count: reward.Amt}
+			item = model.UserItem{UserID: userID, Type: reward.Value, Name: reward.Name, Category: "usable", Count: reward.Amt}
 			global.DB.Create(&item)
 		} else {
 			item.Count += reward.Amt
 			global.DB.Save(&item)
 		}
 	}
+	global.DB.Save(dragon)
 
 	// 增加计数
 	now = time.Now()
@@ -309,7 +419,9 @@ func (s *DragonService) Evolve(userID uint, userToken string) (string, error) {
 	if err != nil { return "", err }
 	if dragon.Stage >= 4 { return "", fmt.Errorf("已是真龙之躯，无可再进") }
 
-	nextExp := (dragon.Stage + 1) * 200
+	// 对应前端 [100, 300, 800, 2000]
+	expMap := []int{100, 300, 800, 2000}
+	nextExp := expMap[dragon.Stage]
 	if dragon.Exp < nextExp {
 		return "", fmt.Errorf("成长值不足，尚需修行 (当前: %d/%d)", dragon.Exp, nextExp)
 	}
@@ -338,8 +450,9 @@ func (s *DragonService) Evolve(userID uint, userToken string) (string, error) {
 	}
 	fmt.Printf("[DB Update] Dragon %d (User %d) evolved to stage %d. New BasePrompt: %s\n", dragon.ID, userID, dragon.Stage, dragon.BasePrompt)
 
-	// 自动触发新阶真身显像 (不传递参考图，让 AI 自由发挥)
+	// 自动触发新阶真身显像
 	go s.GenerateImage(userID, userToken, "")
+
 
 	return fmt.Sprintf("突破成功！你的龙嗣已进化为【%s】，其基因图谱已自适应演变。正在为你重塑新阶真身...", newStageName), nil
 }
@@ -351,20 +464,21 @@ func (s *DragonService) triggerPromptEvolution(oldPrompt, oldStage, newStage str
 	
 	systemPrompt := `You are a dragon genetic specialist. Rewrite the dragon's appearance description to reflect its evolution.
 STAGES & TRANSITIONS:
-- Hatchling (幼龙): Tiny, cute, baby dragon, breaking out of a shell, curious eyes, slightly clumsy.
-- Young Dragon (青年龙): Slender, agile, and athletic. An adolescent dragon, sleek and fast. Smaller horns and wings. NOT bulky.
-- Adult Dragon (壮年龙): Massive, heavy, and extremely muscular. Large wingspan, imposing presence, thick scales and large horns.
-- True Dragon (真龙): A divine, celestial god-like entity. Radiating infinite energy, majestic and awe-inspiring scale.
+- Hatchling (幼龙): Tiny, cute, newborn dragon JUST broken out of its eggshell, pieces of shell around it, curious large eyes, slightly wet and clumsy.
+- Young Dragon (青年龙): A small, sleek adolescent dragon. Agile, slender, approximately the size of a horse. Sharp growing horns and wings.
+- Adult Dragon (壮年龙): A massive, imposing large dragon. Colossal body, powerful thick scales, wide wingspan, towering over the landscape or buildings.
+- True Dragon (真龙): The ultimate divine form. Incredibly handsome, majestic, radiating golden light or cosmic energy. It is of mountain-like or cosmic scale, god-like presence.
 
 Requirements:
-1. KEEP the dragon's original color scheme and elemental affinity.
-2. EMPHASIZE EXTREME SCALE: 
-   - Hatchlings should be tiny enough to fit in a palm.
-   - Young dragons should be the size of a large dog or horse.
-   - Adult dragons should be massive, capable of crushing buildings or towering over trees.
-   - True dragons should be of cosmic or mountain-like scale.
-3. ABSOLUTELY FORBIDDEN: Do not mention 'egg', 'shell', or 'hatch' for Young, Adult, or True stages.
-4. Output ONLY the new description in English, under 100 words. No introductory text.`
+1. STRICTLY PRESERVE original colors and elemental features: If the current description mentions "blue scales", "icy breath", or "golden eyes", these MUST be maintained in the new stage.
+2. EMPHASIZE EXTREME SCALE DIFFERENCE: 
+   - Hatchlings: Palm-sized, with eggshells.
+   - Young: Small/Medium size (horse-sized).
+   - Adult: Giant/Large size (building-sized).
+   - True: God-like/Cosmic size (mountain-sized).
+3. STYLE: Ensure the final stage (True Dragon) is exceptionally handsome, majestic, and powerful.
+4. Output ONLY the new description in English, under 100 words. No introductory text.
+`
 	userPrompt := fmt.Sprintf("Current Stage: %s, Next Stage: %s. Current Description: %s", oldStage, newStage, oldPrompt)
 	
 	newPrompt, err := client.GetChatCompletion("gpt-4o-mini", userPrompt, systemPrompt)
@@ -497,14 +611,8 @@ func (s *DragonService) ShareToChat(userID uint) error {
 		return errors.New("你的龙宝宝还没有幻化真身，快去显像吧")
 	}
 
-	// 校验每日分享次数
-	today := time.Now().Format("2006-01-02")
-	var task model.UserTask
-	if err := global.DB.Where("user_id = ? AND task_type = ? AND date = ?", userID, "share", today).First(&task).Error; err == nil {
-		if task.Progress >= 1 {
-			return errors.New("今日已在广场展示过英姿，请明日再来")
-		}
-	}
+	// 已去除每日分享次数校验，允许游侠多次展示英姿
+
 
 	// 构造展示消息
 	content := fmt.Sprintf("[真身显现] 游侠展示了他的龙宝宝 **%s**！\n\n![](%s)", dragon.Name, dragon.ImageURL)
@@ -528,9 +636,9 @@ func (s *DragonService) ShareToChat(userID uint) error {
 	return nil
 }
 
-// UpdateTaskProgress 更新任务进度
+// UpdateTaskProgress 更新任务进度 (凌晨3点刷新逻辑)
 func (s *DragonService) UpdateTaskProgress(userID uint, taskType string, amount int) {
-	today := time.Now().Format("2006-01-02")
+	today := time.Now().Add(-3 * time.Hour).Format("2006-01-02")
 	var task model.UserTask
 	
 	if err := global.DB.Where("user_id = ? AND task_type = ? AND date = ?", userID, taskType, today).First(&task).Error; err != nil {
@@ -562,7 +670,7 @@ func (s *DragonService) GetDailyTasks(userID uint) []model.UserTask {
 		rarity = dragon.Rarity
 	}
 
-	today := time.Now().Format("2006-01-02")
+	today := time.Now().Add(-3 * time.Hour).Format("2006-01-02")
 	
 	// 任务配置: {基础次数, 基础龙粮奖励, 基础经验奖励}
 	type taskCfg struct {
@@ -589,29 +697,43 @@ func (s *DragonService) GetDailyTasks(userID uint) []model.UserTask {
 		diffMult = 3.5
 	}
 
+	var existingTasks []model.UserTask
+	global.DB.Where("user_id = ? AND date = ?", userID, today).Find(&existingTasks)
+
+	taskMap := make(map[string]*model.UserTask)
+	for i := range existingTasks {
+		taskMap[existingTasks[i].TaskType] = &existingTasks[i]
+	}
+
 	var tasks []model.UserTask
 	for _, cfg := range orderedConfigs {
 		tt := cfg.key
 		vals := cfg.vals
-		var task model.UserTask
 		maxProgress := int(float64(vals[0]) * diffMult)
-		if maxProgress < 1 { maxProgress = 1 }
+		if maxProgress < 1 {
+			maxProgress = 1
+		}
 
-		if err := global.DB.Where("user_id = ? AND task_type = ? AND date = ?", userID, tt, today).First(&task).Error; err != nil {
-			task = model.UserTask{
+		if task, ok := taskMap[tt]; ok {
+			// 如果任务已存在，检查是否需要更新 MaxProgress
+			if task.MaxProgress != maxProgress {
+				task.MaxProgress = maxProgress
+				global.DB.Select("MaxProgress").Save(task)
+			}
+			tasks = append(tasks, *task)
+		} else {
+			// 如果任务不存在，创建新任务
+			newTask := model.UserTask{
 				UserID:      userID,
 				TaskType:    tt,
 				Progress:    0,
 				MaxProgress: maxProgress,
 				Date:        today,
 			}
-			global.DB.Create(&task)
-		} else {
-			task.MaxProgress = maxProgress
-			task.TaskType = tt 
-			global.DB.Save(&task)
+			if err := global.DB.Create(&newTask).Error; err == nil {
+				tasks = append(tasks, newTask)
+			}
 		}
-		tasks = append(tasks, task)
 	}
 	return tasks
 }
@@ -697,7 +819,8 @@ func (s *DragonService) GenerateImage(userID uint, userToken string, refImageURL
 		return err
 	}
 
-	todayStart := time.Now().Truncate(24 * time.Hour)
+	// 每日显像限制也跟随 3点刷新逻辑
+	todayStart := time.Now().Add(-3 * time.Hour).Truncate(24 * time.Hour).Add(3 * time.Hour)
 	var gCount int64
 	global.DB.Model(&model.MagicRecord{}).Where("created_at >= ?", todayStart).Count(&gCount)
 	if gCount >= 20 {
@@ -710,13 +833,13 @@ func (s *DragonService) GenerateImage(userID uint, userToken string, refImageURL
 	}
 	global.DB.Create(record)
 
-	stages := []string{"mystical egg", "hatchling dragon", "young dragon", "adult dragon", "divine true dragon"}
+	stages := []string{"mystical dragon egg", "newborn hatchling dragon with broken eggshells", "sleek small adolescent dragon", "colossal large adult dragon", "divine majestic handsome true dragon"}
 	sizeKeywords := []string{
-		"tiny size, minuscule like a small toy", 
-		"hand-sized baby, cute small proportions", 
-		"horse-sized adolescent dragon, sleek medium build", 
-		"colossal mountain-sized dragon, towering over clouds", 
-		"infinite cosmic scale, god-like celestial entity",
+		"small size, sitting on a pedestal", 
+		"tiny palm-sized, emerging from a shell, macro photography", 
+		"small-medium size, horse-sized, agile build, forest background", 
+		"massive colossal scale, building-sized, powerful presence, mountains in background", 
+		"god-like cosmic scale, mountain-sized, handsome facial features, radiant energy, cinematic masterpiece",
 	}
 	
 	currentStage := stages[0]

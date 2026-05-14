@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dragon-islet/internal/global"
 	"dragon-islet/internal/handler"
 	"dragon-islet/internal/initialize"
 	"net/http"
@@ -40,6 +41,9 @@ func main() {
 	dragonService.StartLifeCycle()
 
 	r := gin.Default()
+
+	// 初始化监控
+	initialize.InitPrometheus(r)
 
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
@@ -131,7 +135,8 @@ func main() {
 		}
 
 		// 养成系统
-		dragonHandler := handler.NewDragonHandler(dragonSvc)
+		ttsSvc := service.TTSService{}
+		dragonHandler := handler.NewDragonHandler(dragonSvc, chatSvc, ttsSvc)
 		dragonGroup := api.Group("/raising")
 		dragonGroup.Use(middleware.JWTAuth())
 		{
@@ -149,6 +154,7 @@ func main() {
 			dragonGroup.GET("/chat", dragonHandler.GetChatHistory)
 			dragonGroup.POST("/chat", dragonHandler.Chat)
 			dragonGroup.POST("/release", dragonHandler.Release)
+			dragonGroup.GET("/speak", dragonHandler.Speak)
 		}
 
 		// 管理员相关
@@ -166,13 +172,14 @@ func main() {
 	})
 
 	// 静态文件服务
-	// 静态文件访问交由 Nginx 处理，服务器不再直接暴露 uploads 目录。
-	// 如需在 Go 中启用静态服务，可取消下面代码并确保 save_path 为正确绝对路径。
-	// saveDir := global.CONFIG.GetString("upload.save_path")
-	// if saveDir == "" {
-	//         saveDir = "./uploads"
-	// }
-	// r.Static("/dragon/uploads", saveDir)
+	// 无论是在本地还是云端，如果本地存有文件，则开启静态访问
+	saveDir := global.CONFIG.GetString("upload.save_path")
+	if saveDir == "" {
+		saveDir = "./uploads"
+	}
+	// 将 /uploads 映射到本地目录
+	r.Static("/uploads", saveDir)
+	fmt.Printf("[System] Static file service enabled: /uploads -> %s\n", saveDir)
 
 	r.Run(":8888")
 }

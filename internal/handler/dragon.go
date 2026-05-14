@@ -1,24 +1,31 @@
 package handler
 
 import (
-	"dragon-islet/internal/service"
-	"net/http"
 	"bufio"
+	"dragon-islet/internal/global"
+	"dragon-islet/internal/service"
 	"encoding/json"
-	"strings"
+	"fmt"
 	"math/rand"
+	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
 type DragonHandler struct {
 	dragonService service.DragonService
+	chatService   service.ChatService
+	ttsService    service.TTSService
 }
 
-func NewDragonHandler(dragonSvc service.DragonService) *DragonHandler {
+func NewDragonHandler(dragonSvc service.DragonService, chatSvc service.ChatService, ttsSvc service.TTSService) *DragonHandler {
 	return &DragonHandler{
 		dragonService: dragonSvc,
+		chatService:   chatSvc,
+		ttsService:    ttsSvc,
 	}
 }
 
@@ -36,11 +43,13 @@ func (h *DragonHandler) GetStatus(c *gin.Context) {
 	}
 
 	items, _ := h.dragonService.GetItems(userID)
+	magicUsage := h.chatService.GetTodayMagicUsage(userID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"has_dragon": true,
-		"dragon":     dragon,
-		"items":      items,
+		"has_dragon":  true,
+		"dragon":      dragon,
+		"items":       items,
+		"magic_usage": magicUsage,
 	})
 }
 
@@ -146,13 +155,14 @@ func (h *DragonHandler) UseItem(c *gin.Context) {
 	userID := c.MustGet("userID").(uint)
 	var req struct {
 		Type string `json:"type" binding:"required"`
+		Name string `json:"name"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要使用的道具"})
 		return
 	}
 
-	msg, err := h.dragonService.UseItem(userID, req.Type)
+	msg, err := h.dragonService.UseItem(userID, req.Type, req.Name)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -259,5 +269,62 @@ func (h *DragonHandler) GetSummary(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"has_dragon":       dragon != nil,
 		"all_tasks_done": allDone,
+	})
+}
+
+func (h *DragonHandler) Speak(c *gin.Context) {
+	userID := c.MustGet("userID").(uint)
+	dragon, _ := h.dragonService.GetDragon(userID)
+	if dragon == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "你还没有与任何龙嗣建立契约"})
+		return
+	}
+
+	// 随机语录库
+	quotes := []string{
+		"龙主，今天也要一起努力修行吗？",
+		"我感受到了龙屿上的灵力正在波动，是有什么好事发生吗？",
+		"肚子稍微有一点点饿了，嘿嘿...",
+		"如果你感到疲惫，我的背脊永远是你停靠的港湾。",
+		"看！那边的云朵，长得好像我刚破壳时的样子。",
+	}
+
+	// 根据状态调整语录
+	if dragon.Hunger < 30 {
+		quotes = append(quotes, "咕噜噜... 肚子在抗议了，想吃好吃的！")
+	}
+	if dragon.Happiness < 30 {
+		quotes = append(quotes, "最近感觉有一点点闷，陪我玩一会儿好吗？")
+	}
+
+	text := quotes[rand.Intn(len(quotes))]
+
+	// 1. 生成本地语音
+	fileName, err := h.ttsService.GetDragonVoice(dragon, text)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"text": text, "audio_url": "", "msg": "语音生成失败"})
+		return
+	}
+
+	// 2. 构造本地路径用于上传
+	saveDir := global.CONFIG.GetString("upload.save_path")
+	if saveDir == "" {
+		saveDir = "./uploads"
+	}
+	localPath := filepath.Join(saveDir, "audio", fileName)
+
+	// 获取用户 Token 并上传到云端
+	cloudSvc := service.CloudService{}
+	cloudURL, err := cloudSvc.UploadFileToCloud(localPath, false, c.GetHeader("Authorization"))
+	if err != nil {
+		fmt.Printf("[TTS] Cloud upload failed: %v\n", err)
+		// 如果云端上传失败，回退到本地 URL (作为兜底)
+		uploadURL := global.CONFIG.GetString("upload_url")
+		cloudURL = fmt.Sprintf("%s/audio/%s", uploadURL, fileName)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"text":      text,
+		"audio_url": cloudURL,
 	})
 }

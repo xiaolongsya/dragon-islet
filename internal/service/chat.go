@@ -24,7 +24,7 @@ import (
 type ChatService struct{}
 
 // SendMessage 处理发送消息逻辑
-func (s *ChatService) SendMessage(userID uint, content string) (*model.Message, bool, error) {
+func (s *ChatService) SendMessage(userID uint, content string, userToken string) (*model.Message, bool, error) {
 	ctx := context.Background()
 	key := fmt.Sprintf("chat_limit:%d", userID)
 	if exists, _ := global.REDIS.Exists(ctx, key).Result(); exists > 0 {
@@ -76,14 +76,14 @@ func (s *ChatService) SendMessage(userID uint, content string) (*model.Message, 
 	ds.UpdateTaskProgress(userID, "chat", 1)
 
 	if willReply {
-		go s.TriggerAIReply(msg)
+		go s.TriggerAIReply(msg, userToken)
 	}
 
 	return msg, willReply, nil
 }
 
 // TriggerAIReply 触发异步回复逻辑
-func (s *ChatService) TriggerAIReply(userMsg *model.Message) {
+func (s *ChatService) TriggerAIReply(userMsg *model.Message, userToken string) {
 	time.Sleep(2 * time.Second)
 
 	var contextMsgs []model.Message
@@ -196,12 +196,12 @@ func (s *ChatService) TriggerAIReply(userMsg *model.Message) {
 				targetUserName = strings.TrimSpace(strings.TrimPrefix(line, "给予用户："))
 			}
 		}
-		s.DeliverEgg(userMsg, dragonName, targetUserName)
+		s.DeliverEgg(userMsg, dragonName, targetUserName, userToken)
 	}
 }
 
 // DeliverEgg 发放龙蛋 (支持显式指定用户)
-func (s *ChatService) DeliverEgg(userMsg *model.Message, name string, targetUserName string) {
+func (s *ChatService) DeliverEgg(userMsg *model.Message, name string, targetUserName string, userToken string) {
 	var targetUserID uint
 	if targetUserName != "" {
 		var u model.User
@@ -232,14 +232,19 @@ func (s *ChatService) DeliverEgg(userMsg *model.Message, name string, targetUser
 		rarity = "rare"
 	}
 
-	// 1. 生成独一无二的灵魂性格 (通过 DeepSeek)
+	// 1. 生成独一无二的灵魂性格与视觉特征 (通过 DeepSeek)
 	personality := "温顺"
 	soul := "天性纯良，充满了对世界的好奇。"
+	visual := "A mystical dragon egg, " + rarity + " style, glowing runes, cinematic lighting"
 	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
 	
-	systemPrompt := `You are a dragon soul architect. Create a unique personality for a newborn dragon egg. 
-Output ONLY in JSON format: {"personality": "2-4 characters label", "soul": "mystical description under 30 words"}.
-Make it sound mystical and unique. DO NOT use emojis.`
+	systemPrompt := `You are a dragon architect. Create a unique personality and visual identity for a newborn dragon egg. 
+	Output ONLY in JSON format: {
+		"personality": "2-4 characters label", 
+		"soul": "mystical description under 30 words",
+		"visual": "detailed visual description of the egg including color, element (fire, ice, etc.), and texture (e.g., obsidian, pearl, emerald) under 40 words"
+	}.
+	Make it sound mystical and unique. DO NOT use emojis.`
 	userPrompt := fmt.Sprintf("Dragon Name: %s, Rarity: %s", name, rarity)
 	
 	prompt := []deepseek.Message{
@@ -251,10 +256,14 @@ Make it sound mystical and unique. DO NOT use emojis.`
 		var res struct {
 			Personality string `json:"personality"`
 			Soul        string `json:"soul"`
+			Visual      string `json:"visual"`
 		}
 		if err := json.Unmarshal([]byte(resp), &res); err == nil {
 			personality = res.Personality
 			soul = res.Soul
+			if res.Visual != "" {
+				visual = res.Visual
+			}
 		}
 	}
 
@@ -267,13 +276,17 @@ Make it sound mystical and unique. DO NOT use emojis.`
 		Exp:          0,
 		LastFedAt:    &now,
 		LastPlayedAt: &now,
-		BasePrompt:   "A mystical dragon egg, " + rarity + " style, glowing runes, cinematic lighting",
+		BasePrompt:   visual,
 		Seed:         rand.Int63(),
 		Personality:  personality,
 		Soul:         soul, // 初始灵魂
 		Memory:       "这是它生命的起点，它感受到了龙屿广场上温暖的誓言。",
 	}
 	global.DB.Create(newDragon)
+
+	// 自动触发首次显像
+	var ds DragonService
+	ds.GenerateImage(targetUserID, userToken, "")
 }
 
 // GetMessages 获取消息
@@ -341,7 +354,9 @@ func (s *ChatService) ForceAIReply(userID uint, messageID uint) error {
 	logic.GlobalHub.BroadcastMessage(&msg)
 
 	global.REDIS.Set(ctx, cooldownKey, "1", 1*time.Minute)
-	go s.TriggerAIReply(&msg)
+	// 这里无法直接获取 token，如果是秘宝触发，可能需要前端传参或忽略自动显像
+	// 为简化，这里暂不处理秘宝触发的自动显像，用户可以手动点击“唤起”
+	go s.TriggerAIReply(&msg, "")
 	return nil
 }
 
@@ -539,4 +554,13 @@ func (s *ChatService) uploadToCloud(remoteURL string, userToken string) (string,
 	}
 	json.NewDecoder(resp2.Body).Decode(&result)
 	return result.Data.URL, nil
+}
+
+func (s *ChatService) GetTodayMagicUsage(userID uint) int {
+	todayStart := time.Now().Truncate(24 * time.Hour)
+	var count int64
+	global.DB.Model(&model.MagicRecord{}).
+		Where("user_id = ? AND created_at >= ? AND prompt != ?", userID, todayStart, "Dragon Evolution Image").
+		Count(&count)
+	return int(count)
 }

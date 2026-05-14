@@ -30,6 +30,9 @@ func InitConfig() {
 	if os.Getenv("DEEPSEEK_API_KEY") != "" {
 		v.Set("deepseek.api_key", os.Getenv("DEEPSEEK_API_KEY"))
 	}
+	if os.Getenv("DASHSCOPE_API_KEY") != "" {
+		v.Set("aliyun.api_key", os.Getenv("DASHSCOPE_API_KEY"))
+	}
 	if os.Getenv("DB_DSN") != "" {
 		v.Set("db.dsn", os.Getenv("DB_DSN"))
 	}

@@ -67,7 +67,8 @@ func (h *ChatHandler) Send(c *gin.Context) {
 		return
 	}
 
-	msg, willReply, err := h.chatService.SendMessage(userID, req.Content)
+	token := c.GetHeader("Authorization")
+	msg, willReply, err := h.chatService.SendMessage(userID, req.Content, token)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

@@ -15,34 +15,45 @@ type ArchiveService struct{}
 
 // GenerateDailyArchive 生成每日史诗
 func (s *ArchiveService) GenerateDailyArchive() error {
-	// 1. 获取过去 24 小时的消息
-	yesterday := time.Now().Add(-24 * time.Hour)
+	// 1. 获取昨天(全天)的时间范围
+	now := time.Now()
+	yesterday := now.AddDate(0, 0, -1)
+	
+	// 昨天 00:00:00
+	startTime := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
+	// 昨天 23:59:59
+	endTime := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, now.Location())
+	
 	archiveDate := yesterday.Format("2006-01-02")
 
 	// 检查是否已存在
 	var count int64
 	global.DB.Model(&model.Archive{}).Where("date = ? AND type = 0", archiveDate).Count(&count)
 	if count > 0 {
-		fmt.Printf("今日史诗 (%s) 已记录在册，无需重复铸造\n", archiveDate)
+		fmt.Printf("昨日史诗 (%s) 已记录在册，无需重复铸造\n", archiveDate)
 		return nil
 	}
 
 	var messages []model.Message
-	global.DB.Preload("User").Where("created_at > ? AND created_at < ?", yesterday, time.Now()).Find(&messages)
+	// 查询昨天全天的消息记录
+	global.DB.Preload("User").Where("created_at >= ? AND created_at <= ?", startTime, endTime).Find(&messages)
 
 	// 2. 构造 AI 指导语
 	dsClient := deepseek.NewClient(global.CONFIG.GetString("deepseek.api_key"))
-	systemPrompt := `你是一个名为'龙屿之主'的远古巨龙。你需要根据当天的聊天记录写一篇《岛屿史诗》。
-如果你具备联网搜索能力，请务必开启并扫描过去 24 小时内的全球重大新闻（侧重科技、天文、地缘政治或奇异事件）。
-如果当天有游侠留言，请点评他们的誓言。
-如果当天寂静无声，或者为了充实史诗，请你以巨龙那种不屑又充满智慧的口吻，挑选 3-5 件真实发生的尘世大事进行点评。
-标题格式：岛屿史诗 · [日期]
-内容要求：语言极其富有文学气息，中二且深邃。包含：'今日回响'（游侠动态）、'尘世幻象'（真实世界新闻）。
-请直接输出内容，严禁使用任何 Emoji 表情符号，不要包含 Markdown 代码块符号。`
+	systemPrompt := fmt.Sprintf(`你是一个名为'龙屿之主'的远古巨龙，也是时间的见证者。
+你需要根据昨日（日期：%s）的游侠对话和全球动态，撰写一篇《岛屿史诗》。
+内容职责：
+1. 总结游侠动态：回顾昨日在龙屿留下誓言的游侠，点评他们的言论（中二、深邃、不屑的口吻）。
+2. 洞察尘世幻象：如果你具备搜索能力，请检索并总结日期为 %s 的全球重大事件（科技突破、天文异象、地缘波动）。
+3. 降下神谕：以巨龙的视角，对昨日的种种因果进行总结性陈词。
+
+标题格式：岛屿史诗 · [日期] (例如：岛屿史诗 · 05月13日)
+语言风格：史诗感、晦涩、威严、中二、禁忌感。
+禁止事项：严禁使用 Emoji，严禁包含 Markdown 代码块标记，不要出现'好的'、'明白'等废话。`, archiveDate, archiveDate)
 
 	userContent := ""
 	if len(messages) == 0 {
-		userContent = fmt.Sprintf("今日岛屿寂静。现在是 %s，请龙主俯瞰凡间，聊聊尘世间的最新变动，并降下神谕。", time.Now().Format("2006-01-02"))
+		userContent = fmt.Sprintf("昨日（%s）岛屿寂静无声。请龙主俯瞰凡间，挑选 3-5 件昨日发生的尘世大事进行点评，并降下关于未来的神谕。", archiveDate)
 	} else {
 		chatContext := ""
 		for _, m := range messages {
@@ -55,7 +66,7 @@ func (s *ArchiveService) GenerateDailyArchive() error {
 			}
 			chatContext += fmt.Sprintf("[%s]: %s\n", name, m.Content)
 		}
-		userContent = fmt.Sprintf("今日日期：%s\n游侠们的对话记录如下：\n%s\n请龙主总结并侃侃而谈。", time.Now().Format("2006-01-02"), chatContext)
+		userContent = fmt.Sprintf("记录日期：%s\n昨日游侠们的对话记录如下：\n%s\n请龙主以此为引，结合昨日尘世异象，降下史诗。", archiveDate, chatContext)
 	}
 
 	prompt := []deepseek.Message{
@@ -74,8 +85,8 @@ func (s *ArchiveService) GenerateDailyArchive() error {
 	archive := &model.Archive{
 		Title:   fmt.Sprintf("岛屿史诗 · %s", archiveTitle),
 		Content: content,
-		Date:    archiveDate, // 使用函数头部定义的变量
-		Type:    0,           // 每日行纪
+		Date:    archiveDate,
+		Type:    0, // 每日行纪
 	}
 
 	return global.DB.Create(archive).Error
