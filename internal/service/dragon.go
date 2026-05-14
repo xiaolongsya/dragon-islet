@@ -668,7 +668,6 @@ func (s *DragonService) ShareToChat(userID uint) error {
 // UpdateTaskProgress 更新任务进度 (凌晨3点刷新逻辑)
 func (s *DragonService) UpdateTaskProgress(userID uint, taskType string, amount int) {
 	today := time.Now().Add(-3 * time.Hour).Format("2006-01-02")
-	today := time.Now().Add(-3 * time.Hour).Format("2006-01-02")
 	var task model.UserTask
 
 	if err := global.DB.Where("user_id = ? AND task_type = ? AND date = ?", userID, taskType, today).First(&task).Error; err != nil {
@@ -700,7 +699,6 @@ func (s *DragonService) GetDailyTasks(userID uint) []model.UserTask {
 		rarity = dragon.Rarity
 	}
 
-	today := time.Now().Add(-3 * time.Hour).Format("2006-01-02")
 	today := time.Now().Add(-3 * time.Hour).Format("2006-01-02")
 
 	// 任务配置: {基础次数, 基础龙粮奖励, 基础经验奖励}
@@ -855,8 +853,6 @@ func (s *DragonService) GenerateImage(userID uint, userToken string, refImageURL
 		return err
 	}
 
-	// 每日显像限制也跟随 3点刷新逻辑
-	todayStart := time.Now().Add(-3 * time.Hour).Truncate(24 * time.Hour).Add(3 * time.Hour)
 	// 每日显像限制也跟随 3点刷新逻辑
 	todayStart := time.Now().Add(-3 * time.Hour).Truncate(24 * time.Hour).Add(3 * time.Hour)
 	var gCount int64
